@@ -54,9 +54,8 @@ class TradingDashboard(App):
     
     #stats-container { 
         padding: 1;
+        column-span: 1;
         row-span: 2;
-        grid-column: 2;
-        grid-row: 1 / 3;
     }
     
     BotStats {
