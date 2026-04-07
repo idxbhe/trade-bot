@@ -1,11 +1,69 @@
 from textual.app import ComposeResult
-from textual.widgets import Static, DataTable, OptionList, Button
+from textual.widgets import Static, DataTable, OptionList, Button, RichLog
 from textual.screen import ModalScreen
 from textual.containers import Container, Horizontal
 from textual.reactive import reactive
 from rich.text import Text
 from rich.panel import Panel
 from rich.table import Table
+
+class LogModal(ModalScreen):
+    """A fullscreen-ish modal to display system logs."""
+    
+    DEFAULT_CSS = """
+    LogModal {
+        align: center middle;
+    }
+
+    #log-modal-container {
+        width: 90%;
+        height: 85%;
+        border: thick $primary;
+        background: $surface;
+        padding: 1;
+    }
+
+    #log-modal-title {
+        text-align: center;
+        width: 100%;
+        margin-bottom: 1;
+        text-style: bold;
+        color: $accent;
+    }
+
+    #log-modal-hint {
+        text-align: center;
+        width: 100%;
+        margin-top: 1;
+        color: $text-muted;
+    }
+
+    #log-modal-widget {
+        height: 1fr;
+        border: solid $primary-muted;
+    }
+    """
+
+    def __init__(self, log_history: list[str]):
+        super().__init__()
+        self.log_history = log_history
+
+    def compose(self) -> ComposeResult:
+        with Container(id="log-modal-container"):
+            yield Static("SYSTEM LOGS", id="log-modal-title")
+            self.log_widget = RichLog(highlight=True, markup=True, id="log-modal-widget")
+            yield self.log_widget
+            yield Static("[Esc / L] Tutup", id="log-modal-hint")
+
+    def on_mount(self) -> None:
+        for line in self.log_history:
+            self.log_widget.write(line)
+        self.log_widget.scroll_end(animate=False)
+        self.log_widget.focus()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape" or event.key == "l":
+            self.dismiss()
 
 class SelectionModal(ModalScreen):
     """A centered modal for selecting an option from a list."""

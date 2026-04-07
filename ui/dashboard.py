@@ -6,7 +6,7 @@ from textual.widgets import Header, Footer, RichLog, DataTable
 from textual.containers import Grid, Container, Vertical
 from textual import work
 
-from ui.components import ActiveOrdersTable, BotStats, SelectionModal, ActivityTicker, HistoryTable
+from ui.components import ActiveOrdersTable, BotStats, SelectionModal, ActivityTicker, HistoryTable, LogModal
 from core.logger import log_queue
 from core.config import config
 from exchange.kucoin import kucoin_client, kucoin_futures_client
@@ -28,22 +28,24 @@ class TradingDashboard(App):
     Grid {
         grid-size: 2 2;
         grid-columns: 1.5fr 1fr;
-        grid-rows: 1fr 1.2fr;
+        grid-rows: 1fr 1fr;
         padding: 1;
         background: $surface;
     }
     
-    #market-panel, #stats-container, #history-panel, #log-panel {
+    #market-panel, #stats-container, #history-panel {
         height: 100%;
         width: 100%;
     }
     
-    #market-panel { border: solid green; }
-    #history-panel { border: solid yellow; }
+    #market-panel { border: solid green; grid-column: 1; grid-row: 1; }
+    #history-panel { border: solid yellow; grid-column: 1; grid-row: 2; }
     
     #stats-container { 
         border: solid blue; 
         padding: 1;
+        grid-column: 2;
+        grid-row: 1 / 3;
     }
     
     BotStats {
@@ -59,11 +61,6 @@ class TradingDashboard(App):
         border: none;
     }
     
-    #log-panel { 
-        border: solid white;
-        height: 100%;
-    }
-    
     RichLog { height: 100%; }
     """
     
@@ -72,12 +69,14 @@ class TradingDashboard(App):
         ("s", "toggle_bot", "Start/Stop Bot"),
         ("m", "toggle_market", "Toggle Market"),
         ("e", "cycle_engine", "Cycle Engine"),
-        ("c", "manual_close", "Close Order")
+        ("c", "manual_close", "Close Order"),
+        ("l", "toggle_logs", "Logs")
     ]
 
     def __init__(self):
         super().__init__()
         self.bot_running = False
+        self.log_history = [] # Keep log history for modal display
         self.spot_engines = [HybridEngineV1, ScannerOnlyEngine, AggressiveScalperEngine]
         self.futures_engines = [OBIScalperEngine, PlaceholderFuturesEngine]
         
@@ -106,10 +105,6 @@ class TradingDashboard(App):
             with Container(id="history-panel"):
                 self.history_table = HistoryTable()
                 yield self.history_table
-
-            with Container(id="log-panel"):
-                self.log_widget = RichLog(highlight=True, markup=True)
-                yield self.log_widget
         yield Footer()
 
     async def action_manual_close(self) -> None:
@@ -181,10 +176,21 @@ class TradingDashboard(App):
         self.activity_ticker.message = "Engine activity will appear here..."
 
     def flush_logs(self) -> None:
-        """Route system logs (errors/warnings) to log panel, ignoring engine logs."""
+        """Route system logs (errors/warnings) to history buffer and active modal."""
         while not log_queue.empty():
             msg = log_queue.get_nowait()
-            self.log_widget.write(msg)
+            self.log_history.append(msg)
+            # Limit history size to 1000 lines for memory efficiency
+            if len(self.log_history) > 1000:
+                self.log_history.pop(0)
+            
+            # If the LogModal is currently open, write to it live
+            if isinstance(self.screen, LogModal):
+                self.screen.log_widget.write(msg)
+
+    def action_toggle_logs(self) -> None:
+        """Open the log history modal."""
+        self.push_screen(LogModal(self.log_history))
 
     async def action_toggle_market(self) -> None:
         if self.bot_running:

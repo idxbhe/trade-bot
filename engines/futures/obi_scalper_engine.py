@@ -95,7 +95,6 @@ class OBIScalperEngine(BaseEngine):
                     pos['min_pnl'] = min(pos.get('min_pnl', 0.0), floating_pnl)
 
                     if pos['side'] == 'LONG':
-                    if is_long:
                         if price >= pos['take_profit']:
                             self.current_phase = self.PHASE_EXEC
                             self.report_execution(symbol, f"LONG TP HIT @ ${price:,.2f}")
