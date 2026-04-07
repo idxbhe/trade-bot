@@ -71,7 +71,8 @@ class TradingDashboard(App):
         ("q", "quit_app", "Quit"),
         ("s", "toggle_bot", "Start/Stop Bot"),
         ("m", "toggle_market", "Toggle Market"),
-        ("e", "cycle_engine", "Cycle Engine")
+        ("e", "cycle_engine", "Cycle Engine"),
+        ("enter", "manual_close_dummy", "Close Order")
     ]
 
     def __init__(self):
@@ -110,6 +111,10 @@ class TradingDashboard(App):
                 self.log_widget = RichLog(highlight=True, markup=True)
                 yield self.log_widget
         yield Footer()
+
+    def action_manual_close_dummy(self) -> None:
+        """Dummy action for footer hint. Real logic is in DataTable.RowSelected."""
+        pass
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle manual position close when a row is selected in the active orders table."""
