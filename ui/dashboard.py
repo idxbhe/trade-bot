@@ -38,14 +38,13 @@ class TradingDashboard(App):
         width: 100%;
     }
     
-    #market-panel { border: solid green; grid-column: 1; grid-row: 1; }
-    #history-panel { border: solid yellow; grid-column: 1; grid-row: 2; }
+    #market-panel { border: solid green; }
+    #history-panel { border: solid yellow; }
     
     #stats-container { 
         border: solid blue; 
         padding: 1;
-        grid-column: 2;
-        grid-row: 1 / 3;
+        row-span: 2;
     }
     
     BotStats {
