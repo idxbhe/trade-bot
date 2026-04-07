@@ -72,4 +72,39 @@ class KuCoinClient:
             await self.exchange.close()
             logger.info("KuCoin connection closed.")
 
+class KuCoinFuturesClient(KuCoinClient):
+    def __init__(self):
+        exchange_config = {
+            'enableRateLimit': True,
+            'options': {
+                'adjustForTimeDifference': True,
+            }
+        }
+        
+        if config.BOT_PROXY_URL and config.BOT_PROXY_URL.strip():
+            exchange_config['proxies'] = {
+                'http': config.BOT_PROXY_URL.strip(),
+                'https': config.BOT_PROXY_URL.strip()
+            }
+            logger.info(f"Futures Proxy integration enabled. Routing traffic via: {config.BOT_PROXY_URL.strip()}")
+            
+        if config.KUCOIN_API_KEY and config.KUCOIN_API_KEY != 'your_api_key_here':
+            exchange_config.update({
+                'apiKey': config.KUCOIN_API_KEY,
+                'secret': config.KUCOIN_API_SECRET,
+                'password': config.KUCOIN_API_PASSPHRASE,
+            })
+            
+        self.exchange = ccxt.kucoinfutures(exchange_config)
+        
+        if config.KUCOIN_ENV.lower() == 'sandbox':
+            try:
+                self.exchange.set_sandbox_mode(True)
+                logger.info("KuCoin Futures API initialized in SANDBOX mode.")
+            except Exception as e:
+                logger.warning(f"KuCoin Futures Sandbox mode not supported: {e}. Falling back to live mode.")
+        else:
+            logger.info("KuCoin Futures API initialized in LIVE mode. (Proceed with caution)")
+
 kucoin_client = KuCoinClient()
+kucoin_futures_client = KuCoinFuturesClient()

@@ -22,10 +22,18 @@ class ScannerOnlyEngine(BaseEngine):
         self.logger.info(f"Engine {self.name} initialized for passive monitoring.")
 
     async def update(self):
-        if not self.is_running: return
+        if not self.is_running: 
+            self.current_phase = self.PHASE_IDLE
+            return
+        
+        self.current_phase = self.PHASE_SCAN
+        self.status_message = f"Scanning {len(self.symbols)} symbols..."
         
         for symbol in self.symbols:
+            if not self.is_running: break
             try:
+                self.current_phase = self.PHASE_DATA
+                self.status_message = f"Fetching {symbol}..."
                 ticker = await market_collector.fetch_ticker(symbol)
                 if ticker:
                     self.cached_data[symbol] = {
@@ -36,27 +44,27 @@ class ScannerOnlyEngine(BaseEngine):
             except Exception as e:
                 self.logger.error(f"Scanner error on {symbol}: {e}")
 
+        self.current_phase = self.PHASE_IDLE
+        self.status_message = "Scan cycle complete."
+
     async def get_stats(self) -> Dict[str, Any]:
         return {
             'equity': self.equity,
-            'mode': 'SCAN_ONLY',
+            'initial_equity': self.equity,
+            'total_pnl': 0.0,
+            'daily_pnl': 0.0,
+            'weekly_pnl': 0.0,
+            'monthly_pnl': 0.0,
+            'yearly_pnl': 0.0,
+            'next_reset_in': '00:00:00',
             'active_pos_count': 0,
-            'total_pnl': 0
+            'mode': 'SCAN_ONLY',
+            'current_phase': self.current_phase,
+            'status_message': self.status_message
         }
 
-    async def get_active_symbols(self) -> List[Dict[str, Any]]:
-        results = []
-        for sym, data in self.cached_data.items():
-            results.append({
-                'symbol': sym,
-                'price': data['price'],
-                'rsi': 0.0,
-                'adx': 0.0,
-                'signal': 'SCANNING',
-                'position': 'None',
-                'pnl': '$0.00'
-            })
-        return results
+    async def get_active_orders(self) -> List[Dict[str, Any]]:
+        return []
 
     async def shutdown(self):
         self.stop()

@@ -43,7 +43,7 @@ class MyNewEngine(BaseEngine):
             'total_pnl': 0.0
         }
 
-    async def get_active_symbols(self) -> list:
+    async def get_active_orders(self) -> list:
         """REQUIRED: Return list of dictionaries for the Watchlist table."""
         return [{
             'symbol': 'BTC/USDT',

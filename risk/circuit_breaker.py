@@ -1,47 +1,135 @@
 from core.logger import logger
 from core.config import config
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 
 class CircuitBreaker:
     """
-    Monitors overall account health and daily PNL.
-    Triggers a full system halt if drawdown exceeds the threshold (e.g., 5% in 24h).
+    Monitors overall account health and multi-timeframe PNL.
+    Resets baselines at 07:00 AM on respective boundaries.
     """
     def __init__(self):
         self.max_daily_drawdown_pct = config.CIRCUIT_BREAKER_PCT # e.g., 0.05 (5%)
-        self.initial_daily_equity: Optional[float] = None
-        self.last_reset_time: Optional[datetime] = None
         self.is_tripped = False
         
+        # Baselines
+        self.baseline_daily: Optional[float] = None
+        self.baseline_weekly: Optional[float] = None
+        self.baseline_monthly: Optional[float] = None
+        self.baseline_yearly: Optional[float] = None
+        
+        # Last Reset Times
+        self.last_reset_daily: Optional[datetime] = None
+        self.last_reset_weekly: Optional[datetime] = None
+        self.last_reset_monthly: Optional[datetime] = None
+        self.last_reset_yearly: Optional[datetime] = None
+
+    def _get_reset_boundary(self, timeframe: str) -> datetime:
+        """Returns the PREVIOUS 07:00 AM boundary for a given timeframe."""
+        now = datetime.now()
+        
+        # Baseline is always anchored at 07:00:00
+        if timeframe == 'daily':
+            anchor = now.replace(hour=7, minute=0, second=0, microsecond=0)
+            if now < anchor:
+                anchor -= timedelta(days=1)
+            return anchor
+            
+        elif timeframe == 'weekly':
+            # Monday is 0
+            days_since_monday = now.weekday()
+            anchor = (now - timedelta(days=days_since_monday)).replace(hour=7, minute=0, second=0, microsecond=0)
+            if now < anchor:
+                anchor -= timedelta(days=7)
+            return anchor
+            
+        elif timeframe == 'monthly':
+            anchor = now.replace(day=1, hour=7, minute=0, second=0, microsecond=0)
+            if now < anchor:
+                # Go back to 1st of previous month
+                if now.month == 1:
+                    anchor = anchor.replace(year=now.year-1, month=12)
+                else:
+                    anchor = anchor.replace(month=now.month-1)
+            return anchor
+            
+        elif timeframe == 'yearly':
+            anchor = now.replace(month=1, day=1, hour=7, minute=0, second=0, microsecond=0)
+            if now < anchor:
+                anchor = anchor.replace(year=now.year-1)
+            return anchor
+            
+        return now
+
     def update_equity(self, current_equity: float) -> bool:
         """
-        Checks current equity against the daily baseline.
+        Checks current equity against baselines and handles resets.
         Returns True if trading is ALLOWED, False if Circuit Breaker is TRIPPED.
         """
-        now = datetime.utcnow()
+        now = datetime.now()
         
-        # Initialize or reset the daily baseline at midnight UTC
-        if self.initial_daily_equity is None or (self.last_reset_time and now.date() > self.last_reset_time.date()):
-            self.initial_daily_equity = current_equity
-            self.last_reset_time = now
-            self.is_tripped = False
-            logger.info(f"Circuit Breaker reset. New daily baseline equity: ${self.initial_daily_equity:,.2f}")
-            return True
-            
+        # 1. Handle Resets & Initializations
+        # Daily
+        daily_boundary = self._get_reset_boundary('daily')
+        if self.baseline_daily is None or (self.last_reset_daily and self.last_reset_daily < daily_boundary):
+            self.baseline_daily = current_equity
+            self.last_reset_daily = now
+            self.is_tripped = False # Reset trip status on daily reset
+            logger.info(f"Daily baseline reset: ${self.baseline_daily:,.2f}")
+
+        # Weekly
+        weekly_boundary = self._get_reset_boundary('weekly')
+        if self.baseline_weekly is None or (self.last_reset_weekly and self.last_reset_weekly < weekly_boundary):
+            self.baseline_weekly = current_equity
+            self.last_reset_weekly = now
+            logger.info(f"Weekly baseline reset: ${self.baseline_weekly:,.2f}")
+
+        # Monthly
+        monthly_boundary = self._get_reset_boundary('monthly')
+        if self.baseline_monthly is None or (self.last_reset_monthly and self.last_reset_monthly < monthly_boundary):
+            self.baseline_monthly = current_equity
+            self.last_reset_monthly = now
+            logger.info(f"Monthly baseline reset: ${self.baseline_monthly:,.2f}")
+
+        # Yearly
+        yearly_boundary = self._get_reset_boundary('yearly')
+        if self.baseline_yearly is None or (self.last_reset_yearly and self.last_reset_yearly < yearly_boundary):
+            self.baseline_yearly = current_equity
+            self.last_reset_yearly = now
+            logger.info(f"Yearly baseline reset: ${self.baseline_yearly:,.2f}")
+
+        # 2. Risk Check (Daily Drawdown)
         if self.is_tripped:
-            logger.error("SYSTEM HALTED: Circuit Breaker is currently TRIPPED. Manual intervention required.")
             return False
             
-        # Calculate drawdown
-        drawdown_pct = (self.initial_daily_equity - current_equity) / self.initial_daily_equity
-        
+        drawdown_pct = (self.baseline_daily - current_equity) / self.baseline_daily
         if drawdown_pct >= self.max_daily_drawdown_pct:
             self.is_tripped = True
-            logger.critical(f"CIRCUIT BREAKER TRIPPED! Drawdown ({drawdown_pct*100:.2f}%) exceeded maximum allowed ({self.max_daily_drawdown_pct*100:.2f}%).")
-            logger.critical(f"Initial Equity: ${self.initial_daily_equity:,.2f} | Current Equity: ${current_equity:,.2f}")
+            logger.critical(f"CIRCUIT BREAKER TRIPPED! Drawdown ({drawdown_pct*100:.2f}%) exceeded limit.")
             return False
             
         return True
+
+    def get_pnl_stats(self, current_equity: float) -> Dict[str, Any]:
+        """Returns all timeframe PnL stats and reset timers."""
+        # Ensure baselines exist (first run)
+        if self.baseline_daily is None: self.baseline_daily = current_equity
+        if self.baseline_weekly is None: self.baseline_weekly = current_equity
+        if self.baseline_monthly is None: self.baseline_monthly = current_equity
+        if self.baseline_yearly is None: self.baseline_yearly = current_equity
+        
+        # Calculate Next Daily Reset for the timer
+        next_reset = self._get_reset_boundary('daily') + timedelta(days=1)
+        time_until_reset = next_reset - datetime.now()
+        hours, remainder = divmod(time_until_reset.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        return {
+            'daily_pnl': current_equity - self.baseline_daily,
+            'weekly_pnl': current_equity - self.baseline_weekly,
+            'monthly_pnl': current_equity - self.baseline_monthly,
+            'yearly_pnl': current_equity - self.baseline_yearly,
+            'next_reset_in': f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        }
 
 circuit_breaker = CircuitBreaker()

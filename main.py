@@ -1,7 +1,7 @@
 import sys
 import asyncio
 from ui.dashboard import TradingDashboard
-from exchange.kucoin import kucoin_client
+from exchange.kucoin import kucoin_client, kucoin_futures_client
 
 def main():
     """
@@ -18,6 +18,7 @@ def main():
     finally:
         # Menutup semua session CCXT secara bersih untuk menghindari Unclosed Connector error dari Python
         asyncio.run(kucoin_client.close())
+        asyncio.run(kucoin_futures_client.close())
 
 if __name__ == "__main__":
     main()

@@ -10,7 +10,7 @@ Every engine must inherit from `BaseEngine` (located in `engines/base_engine.py`
 - `async setup(exchange_client, config)`: Initializes the engine with API clients and environment settings.
 - `async update()`: The "heartbeat" of the bot. Performed every cycle to scan the market and execute trades.
 - `async get_stats()`: Returns a dictionary containing performance metrics (Equity, PnL, Mode) for the `BotStats` widget.
-- `async get_active_symbols()`: Returns a list of dictionaries containing symbol data (Price, RSI, ADX, Signal, Position, PnL) for the `WatchlistTable`.
+- `async get_active_orders()`: Returns a list of dictionaries containing symbol data (Price, RSI, ADX, Signal, Position, PnL) for the WatchlistTable.
 - `async shutdown()`: Handles clean exit procedures (e.g., cancelling open orders) before the engine is replaced or the app quits.
 
 ## How to Add a New Engine (Plug-and-Play)
