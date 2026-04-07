@@ -9,56 +9,88 @@ Every new engine file in `/engines/` must follow this structural contract:
 from engines.base_engine import BaseEngine
 from data.fetcher import market_collector
 from data.indicators import Indicators
-# Import other modules as needed (risk, strategy, etc.)
+import time
 
 class MyNewEngine(BaseEngine):
     def __init__(self):
         super().__init__("MyUniqueEngineName")
-        self.internal_state = {} # Use this to manage positions and data cache
+        self.active_positions = {}
+        self.cached_data = {}
 
     async def setup(self, exchange_client, config):
         """Called once when engine is loaded/started."""
         self.exchange = exchange_client
         self.config = config
-        # Initialize equity, load settings, etc.
         pass
 
     async def update(self):
         """The main execution loop. Called periodically by the Host."""
         if not self.is_running: return
         
-        # 1. Market Scanning Logic
-        # 2. Data Acquisition (Use market_collector)
-        # 3. Technical Analysis (Use Indicators)
-        # 4. Risk Management (Use circuit_breaker / position_sizer)
-        # 5. Execution Logic (Update internal_state)
-        pass
+        for symbol in self.symbols_to_monitor:
+            # MANDATORY: Check is_running inside loop to allow instant stop
+            if not self.is_running: break 
+            
+            try:
+                self.report_scan(symbol, "Scanning...")
+                # ... fetch data and analyze ...
+                self.report_analyze(symbol, "Analysis complete.")
+                # ... execution logic ...
+            except Exception as e:
+                self.logger.error(f"Error: {e}")
+
+    async def _close_position(self, symbol, price, reason):
+        """Helper to close position and record history."""
+        pos = self.active_positions.pop(symbol)
+        # ... calculate pnl ...
+        
+        # RECORD HISTORY (REQUIRED for UI)
+        self.order_history.append({
+            'time': time.strftime("%H:%M:%S"),
+            'symbol': symbol,
+            'side': 'LONG',
+            'amount': pos['amount'],
+            'entry': pos['entry_price'],
+            'exit': price,
+            'pnl': pnl,
+            'max_pnl': pos.get('max_pnl', 0.0),
+            'min_pnl': pos.get('min_pnl', 0.0),
+            'reason': reason
+        })
 
     async def get_stats(self) -> dict:
         """REQUIRED: Return data for the 'Bot Status' panel."""
         return {
             'equity': 1000.0,
-            'mode': 'TEST', # 'LIVE' or 'TEST'
-            'active_pos_count': 0,
-            'total_pnl': 0.0
+            'mode': 'TEST', 
+            'active_pos_count': len(self.active_positions),
+            'total_pnl': 0.0,
+            # ... other metrics ...
         }
 
     async def get_active_orders(self) -> list:
-        """REQUIRED: Return list of dictionaries for the Watchlist table."""
+        """REQUIRED: Return list of dictionaries for ActiveOrdersTable."""
         return [{
+            'order_id': 'BTC/USDT_LONG',
             'symbol': 'BTC/USDT',
-            'price': 50000.0,
-            'rsi': 30.5,
-            'adx': 15.2,
-            'signal': 'BUY',
-            'position': 'None',
-            'pnl': '$0.00'
+            'side': 'LONG',
+            'size': 0.1, # Asset amount
+            'entry': 50000.0,
+            'current': 51000.0,
+            'sl': 49000.0,
+            'tp': 55000.0,
+            'pnl': 100.0
         }]
+
+    async def close_position(self, order_id: str):
+        """REQUIRED: Handle manual close request from UI (key 'c')."""
+        symbol = order_id.rsplit('_', 1)[0]
+        if symbol in self.active_positions:
+            await self._close_position(symbol, current_price, "MANUAL_CLOSE")
 
     async def shutdown(self):
         """Called when engine is switched or bot stopped."""
         self.stop()
-        # Cleanup code here (cancel orders, etc.)
         pass
 ```
 
@@ -78,14 +110,15 @@ class MyNewEngine(BaseEngine):
 - Use `risk.circuit_breaker` before opening ANY new position.
 
 ### D. UI Synchronization
-- `get_stats()` and `get_active_symbols()` should be **fast**. They should read from the engine's internal memory/cache, not perform new API requests.
+- `get_stats()`, `get_active_orders()`, and `get_order_history()` should be **fast**. They should read from the engine's internal memory/cache, not perform new API requests.
 
 ## 3. Integration Checklist
-1. Create your class in `engines/your_file.py`.
+1. Create your class in `engines/spot/` or `engines/futures/`.
 2. Open `ui/dashboard.py`.
 3. Import your class at the top.
-4. Add your class to `self.available_engines = [...]` in `TradingDashboard.__init__`.
+4. Add your class to either `self.spot_engines` or `self.futures_engines` in `TradingDashboard.__init__`.
 
 ## 4. Operational Safety
+- **Non-Blocking Loops:** You MUST check `if not self.is_running: break` inside any loop that iterates over symbols in `update()`.
 - **State Isolation:** An engine is a self-contained unit. It should not depend on global variables outside the `engines/` scope except for core utilities.
 - **Error Resilience:** Wrap your `update()` logic in `try-except` blocks. A failure in your scanner should not crash the dashboard.
