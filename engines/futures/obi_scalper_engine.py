@@ -80,12 +80,21 @@ class OBIScalperEngine(BaseEngine):
                 if signal_data['signal'] != 'HOLD':
                     self.report_analyze(symbol, f"Imbalance Trigger: [bold]{signal_data['signal']}[/] ({obi_val*100:.1f}% Bids)")
 
-                # Execution Logic
+                # Monitoring
                 if symbol in self.active_positions:
                     self.current_phase = self.PHASE_RISK
                     pos = self.active_positions[symbol]
-                    is_long = pos['side'] == 'LONG'
-                    
+
+                    # Update Max/Min Floating PnL
+                    if pos['side'] == 'LONG':
+                        floating_pnl = (price - pos['entry_price']) * pos['amount']
+                    else: # SHORT
+                        floating_pnl = (pos['entry_price'] - price) * pos['amount']
+
+                    pos['max_pnl'] = max(pos.get('max_pnl', 0.0), floating_pnl)
+                    pos['min_pnl'] = min(pos.get('min_pnl', 0.0), floating_pnl)
+
+                    if pos['side'] == 'LONG':
                     if is_long:
                         if price >= pos['take_profit']:
                             self.current_phase = self.PHASE_EXEC
@@ -148,7 +157,9 @@ class OBIScalperEngine(BaseEngine):
             'amount': amount,
             'margin': margin_required,
             'stop_loss': sl,
-            'take_profit': tp
+            'take_profit': tp,
+            'max_pnl': 0.0,
+            'min_pnl': 0.0
         }
         self.report_info(f"[{symbol}] OPEN {side} {amount:.4f} @ ${price:,.2f} | Mar: ${margin_required:,.2f}")
 
@@ -175,6 +186,8 @@ class OBIScalperEngine(BaseEngine):
             'entry': pos['entry_price'],
             'exit': exit_price,
             'pnl': pnl,
+            'max_pnl': pos.get('max_pnl', 0.0),
+            'min_pnl': pos.get('min_pnl', 0.0),
             'reason': reason
         })
 

@@ -160,7 +160,9 @@ class TradingDashboard(App):
                 for item in history[-20:]:
                     self.history_table.add_history_entry(
                         item['time'], item['symbol'], item['side'], 
-                        item['amount'], item['exit'], item['pnl'], item['reason']
+                        item['amount'], item['exit'], item['pnl'], 
+                        item.get('max_pnl', 0.0), item.get('min_pnl', 0.0),
+                        item['reason']
                     )
         except Exception as e:
             self.activity_ticker.message = f"[bold red]UI Error:[/] {e}"

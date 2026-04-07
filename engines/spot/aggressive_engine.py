@@ -88,6 +88,11 @@ class AggressiveScalperEngine(BaseEngine):
                     pos = self.active_positions[symbol]
                     sig = self.cached_data[symbol]['signal']
                     
+                    # Update Max/Min Floating PnL
+                    floating_pnl = (price - pos['entry_price']) * pos['amount']
+                    pos['max_pnl'] = max(pos.get('max_pnl', 0.0), floating_pnl)
+                    pos['min_pnl'] = min(pos.get('min_pnl', 0.0), floating_pnl)
+                    
                     # 1. Fixed TP: 1.5x ATR
                     if price >= pos['take_profit']:
                         self.current_phase = self.PHASE_EXEC
@@ -137,7 +142,9 @@ class AggressiveScalperEngine(BaseEngine):
             'entry_price': price,
             'amount': amount,
             'stop_loss': sl,
-            'take_profit': tp
+            'take_profit': tp,
+            'max_pnl': 0.0,
+            'min_pnl': 0.0
         }
         self.report_info(f"[{symbol}] OPEN LONG {amount:.4f} @ ${price:,.2f} | SL: ${sl:,.2f} | TP: ${tp:,.2f}")
 
@@ -157,6 +164,8 @@ class AggressiveScalperEngine(BaseEngine):
             'entry': pos['entry_price'],
             'exit': price,
             'pnl': pnl,
+            'max_pnl': pos.get('max_pnl', 0.0),
+            'min_pnl': pos.get('min_pnl', 0.0),
             'reason': reason
         })
 

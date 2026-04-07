@@ -204,20 +204,26 @@ class HistoryTable(DataTable):
     """Table to show historical closed orders."""
     def on_mount(self) -> None:
         self.cursor_type = "row"
-        self.add_columns("Time", "Symbol", "Side", "Size (USD)", "PnL", "Reason")
+        self.add_columns("Time", "Symbol", "Side", "Size (USD)", "PnL", "Max PnL", "Min PnL", "Reason")
 
-    def add_history_entry(self, time_str: str, symbol: str, side: str, amount: float, exit_price: float, pnl: float, reason: str):
+    def add_history_entry(self, time_str: str, symbol: str, side: str, amount: float, exit_price: float, pnl: float, max_pnl: float, min_pnl: float, reason: str):
         side_text = Text(side)
         if "LONG" in side or "BUY" in side: side_text.stylize("bold green")
         elif "SHORT" in side or "SELL" in side: side_text.stylize("bold red")
         
-        pnl_text = Text(f"{'+' if pnl >= 0 else '-'}${abs(pnl):,.2f}")
-        if pnl > 0: pnl_text.stylize("bold green")
-        elif pnl < 0: pnl_text.stylize("bold red")
+        def fmt_pnl(val: float) -> Text:
+            txt = Text(f"{'+' if val >= 0 else '-'}${abs(val):,.2f}")
+            if val > 0: txt.stylize("bold green")
+            elif val < 0: txt.stylize("bold red")
+            return txt
+
+        pnl_text = fmt_pnl(pnl)
+        max_pnl_text = fmt_pnl(max_pnl)
+        min_pnl_text = fmt_pnl(min_pnl)
         
         size_usd = amount * exit_price
         
         # We don't use key here because we might have multiple entries for same symbol
         self.add_row(
-            time_str, symbol, side_text, f"${size_usd:,.2f}", pnl_text, reason
+            time_str, symbol, side_text, f"${size_usd:,.2f}", pnl_text, max_pnl_text, min_pnl_text, reason
         )
