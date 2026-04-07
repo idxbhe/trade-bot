@@ -171,7 +171,7 @@ class ActiveOrdersTable(DataTable):
     """Table to show real-time metrics for active orders/positions."""
     def on_mount(self) -> None:
         self.cursor_type = "row"
-        self.col_keys = self.add_columns("Symbol", "Type", "Size", "Entry", "Current", "SL", "TP", "PnL")
+        self.col_keys = self.add_columns("Symbol", "Type", "Size (USD)", "Entry", "Current", "SL", "TP", "PnL")
         
     def update_order_data(self, order_id: str, symbol: str, side: str, size: float, entry: float, current: float, sl: float, tp: float, pnl: float):
         # Style logic
@@ -187,8 +187,9 @@ class ActiveOrdersTable(DataTable):
         sl_str = f"${sl:,.2f}" if sl > 0 else "N/A"
         tp_str = f"${tp:,.2f}" if tp > 0 else "N/A"
 
+        size_usd = size * current
         row_data = [
-            symbol, side_text, f"{size:.4f}", f"${entry:,.2f}", f"${current:,.2f}",
+            symbol, side_text, f"${size_usd:,.2f}", f"${entry:,.2f}", f"${current:,.2f}",
             sl_str, tp_str, pnl_text
         ]
         
