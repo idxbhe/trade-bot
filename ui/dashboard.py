@@ -72,7 +72,7 @@ class TradingDashboard(App):
         ("s", "toggle_bot", "Start/Stop Bot"),
         ("m", "toggle_market", "Toggle Market"),
         ("e", "cycle_engine", "Cycle Engine"),
-        ("enter", "manual_close_dummy", "Close Order")
+        ("c", "manual_close", "Close Order")
     ]
 
     def __init__(self):
@@ -112,19 +112,21 @@ class TradingDashboard(App):
                 yield self.log_widget
         yield Footer()
 
-    def action_manual_close_dummy(self) -> None:
-        """Dummy action for footer hint. Real logic is in DataTable.RowSelected."""
-        pass
-
-    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Handle manual position close when a row is selected in the active orders table."""
-        # Use row_key as the order_id
-        order_id = str(event.row_key.value)
-        if order_id:
-            self.activity_ticker.message = f"Requesting manual close for {order_id}..."
-            await self.engine.close_position(order_id)
-            # Re-fetch data immediately
-            await self.update_ui_sync()
+    async def action_manual_close(self) -> None:
+        """Handle manual position close when 'c' key is pressed while ActiveOrdersTable is focused."""
+        if self.focused == self.active_orders_table:
+            row_idx = self.active_orders_table.cursor_row
+            if row_idx is not None:
+                try:
+                    row_key = self.active_orders_table.get_row_key_at(row_idx)
+                    order_id = str(row_key.value)
+                    if order_id:
+                        self.activity_ticker.message = f"Requesting manual close for {order_id}..."
+                        await self.engine.close_position(order_id)
+                        # Re-fetch data immediately
+                        await self.update_ui_sync()
+                except Exception:
+                    pass
 
     async def update_ui_sync(self):
         """Fetch data from the current active engine with robust error handling."""

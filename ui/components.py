@@ -172,7 +172,7 @@ class ActiveOrdersTable(DataTable):
     def on_mount(self) -> None:
         self.cursor_type = "row"
         self.col_keys = self.add_columns("Symbol", "Type", "Size (USD)", "Entry", "Current", "SL", "TP", "PnL")
-        
+
     def update_order_data(self, order_id: str, symbol: str, side: str, size: float, entry: float, current: float, sl: float, tp: float, pnl: float):
         # Style logic
         side_text = Text(side)
