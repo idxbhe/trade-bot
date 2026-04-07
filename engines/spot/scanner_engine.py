@@ -66,6 +66,9 @@ class ScannerOnlyEngine(BaseEngine):
     async def get_active_orders(self) -> List[Dict[str, Any]]:
         return []
 
+    async def close_position(self, order_id: str):
+        self.logger.info(f"Manual close requested for {order_id} in scanner-only engine.")
+
     async def shutdown(self):
         self.stop()
         self.logger.info(f"Engine {self.name} shut down cleanly.")

@@ -2,11 +2,11 @@ import asyncio
 import traceback
 import time
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, RichLog
+from textual.widgets import Header, Footer, RichLog, DataTable
 from textual.containers import Grid, Container, Vertical
 from textual import work
 
-from ui.components import ActiveOrdersTable, BotStats, SelectionModal, ActivityTicker
+from ui.components import ActiveOrdersTable, BotStats, SelectionModal, ActivityTicker, HistoryTable
 from core.logger import log_queue
 from core.config import config
 from exchange.kucoin import kucoin_client, kucoin_futures_client
@@ -28,17 +28,18 @@ class TradingDashboard(App):
     Grid {
         grid-size: 2 2;
         grid-columns: 1.5fr 1fr;
-        grid-rows: 1fr 8;
+        grid-rows: 1fr 1.2fr;
         padding: 1;
         background: $surface;
     }
     
-    #market-panel, #stats-container {
+    #market-panel, #stats-container, #history-panel, #log-panel {
         height: 100%;
         width: 100%;
     }
     
     #market-panel { border: solid green; }
+    #history-panel { border: solid yellow; }
     
     #stats-container { 
         border: solid blue; 
@@ -52,14 +53,13 @@ class TradingDashboard(App):
     
     ActivityTicker {
         height: 3;
-        margin-top: 0;
+        margin-top: 1;
         padding: 1 0;
         background: transparent;
         border: none;
     }
     
     #log-panel { 
-        column-span: 2; 
         border: solid white;
         height: 100%;
     }
@@ -102,16 +102,31 @@ class TradingDashboard(App):
                 self.activity_ticker = ActivityTicker()
                 yield self.activity_ticker
                 
+            with Container(id="history-panel"):
+                self.history_table = HistoryTable()
+                yield self.history_table
+
             with Container(id="log-panel"):
                 self.log_widget = RichLog(highlight=True, markup=True)
                 yield self.log_widget
         yield Footer()
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle manual position close when a row is selected in the active orders table."""
+        # Use row_key as the order_id
+        order_id = str(event.row_key.value)
+        if order_id:
+            self.activity_ticker.message = f"Requesting manual close for {order_id}..."
+            await self.engine.close_position(order_id)
+            # Re-fetch data immediately
+            await self.update_ui_sync()
 
     async def update_ui_sync(self):
         """Fetch data from the current active engine with robust error handling."""
         try:
             stats = await self.engine.get_stats()
             orders = await self.engine.get_active_orders()
+            history = await self.engine.get_order_history()
             
             self.sub_title = f"BOT MONITOR | Engine: {self.engine.name} | Balance: ${stats.get('equity', 0):,.2f}"
             self.bot_stats.stats_data = stats
@@ -122,6 +137,7 @@ class TradingDashboard(App):
             # Clear verbose queue to keep it non-persistent as requested
             self.engine.verbose_queue.clear()
             
+            # Update Active Orders
             self.active_orders_table.clear()
             if orders:
                 for item in orders:
@@ -135,6 +151,16 @@ class TradingDashboard(App):
                         sl=item['sl'], 
                         tp=item['tp'], 
                         pnl=item['pnl']
+                    )
+            
+            # Update History Table
+            self.history_table.clear()
+            if history:
+                # Show only last 20 entries for performance
+                for item in history[-20:]:
+                    self.history_table.add_history_entry(
+                        item['time'], item['symbol'], item['side'], 
+                        item['amount'], item['exit'], item['pnl'], item['reason']
                     )
         except Exception as e:
             self.activity_ticker.message = f"[bold red]UI Error:[/] {e}"

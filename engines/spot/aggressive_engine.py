@@ -148,6 +148,18 @@ class AggressiveScalperEngine(BaseEngine):
         pnl = revenue - (pos['entry_price'] * pos['amount'])
         self.report_info(f"[{symbol}] CLOSE LONG ({reason}) @ ${price:,.2f} | PnL: ${pnl:,.2f}")
 
+        # Record history
+        self.order_history.append({
+            'time': time.strftime("%H:%M:%S"),
+            'symbol': symbol,
+            'side': 'LONG',
+            'amount': pos['amount'],
+            'entry': pos['entry_price'],
+            'exit': price,
+            'pnl': pnl,
+            'reason': reason
+        })
+
     def get_total_equity(self) -> float:
         total_equity = self.equity
         for sym, pos in self.active_positions.items():
@@ -198,6 +210,15 @@ class AggressiveScalperEngine(BaseEngine):
                 'pnl': pnl_val
             })
         return results
+
+    async def close_position(self, order_id: str):
+        # order_id: BTC/USDT_LONG
+        symbol = order_id.rsplit('_', 1)[0]
+        if symbol in self.active_positions:
+            price = self.active_positions[symbol]['entry_price']
+            if symbol in self.cached_data:
+                price = self.cached_data[symbol]['df'].iloc[-1]['close']
+            self._close_position(symbol, price, "MANUAL_CLOSE")
 
     async def shutdown(self):
         self.stop()

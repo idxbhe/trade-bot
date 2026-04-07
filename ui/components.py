@@ -171,7 +171,7 @@ class ActiveOrdersTable(DataTable):
     """Table to show real-time metrics for active orders/positions."""
     def on_mount(self) -> None:
         self.cursor_type = "row"
-        self.col_keys = self.add_columns("Symbol", "Type", "Size (USD)", "Entry", "Current", "SL", "TP", "PnL")
+        self.col_keys = self.add_columns("Symbol", "Type", "Size (USD)", "Entry", "Current", "SL", "TP", "PnL", "Action")
         
     def update_order_data(self, order_id: str, symbol: str, side: str, size: float, entry: float, current: float, sl: float, tp: float, pnl: float):
         # Style logic
@@ -190,7 +190,7 @@ class ActiveOrdersTable(DataTable):
         size_usd = size * current
         row_data = [
             symbol, side_text, f"${size_usd:,.2f}", f"${entry:,.2f}", f"${current:,.2f}",
-            sl_str, tp_str, pnl_text
+            sl_str, tp_str, pnl_text, Text("[CLOSE]", style="bold red reverse")
         ]
         
         try:
@@ -199,3 +199,25 @@ class ActiveOrdersTable(DataTable):
                 self.update_cell(order_id, col_key, row_data[i])
         except Exception: 
             self.add_row(*row_data, key=order_id)
+
+class HistoryTable(DataTable):
+    """Table to show historical closed orders."""
+    def on_mount(self) -> None:
+        self.cursor_type = "row"
+        self.add_columns("Time", "Symbol", "Side", "Size (USD)", "PnL", "Reason")
+
+    def add_history_entry(self, time_str: str, symbol: str, side: str, amount: float, exit_price: float, pnl: float, reason: str):
+        side_text = Text(side)
+        if "LONG" in side or "BUY" in side: side_text.stylize("bold green")
+        elif "SHORT" in side or "SELL" in side: side_text.stylize("bold red")
+        
+        pnl_text = Text(f"{'+' if pnl >= 0 else '-'}${abs(pnl):,.2f}")
+        if pnl > 0: pnl_text.stylize("bold green")
+        elif pnl < 0: pnl_text.stylize("bold red")
+        
+        size_usd = amount * exit_price
+        
+        # We don't use key here because we might have multiple entries for same symbol
+        self.add_row(
+            time_str, symbol, side_text, f"${size_usd:,.2f}", pnl_text, reason
+        )

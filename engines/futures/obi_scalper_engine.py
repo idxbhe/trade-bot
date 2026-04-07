@@ -166,6 +166,18 @@ class OBIScalperEngine(BaseEngine):
         
         self.report_info(f"[{symbol}] CLOSE {pos['side']} ({reason}) @ ${exit_price:,.2f} | PnL: ${pnl:,.2f}")
 
+        # Record history
+        self.order_history.append({
+            'time': time.strftime("%H:%M:%S"),
+            'symbol': symbol,
+            'side': pos['side'],
+            'amount': pos['amount'],
+            'entry': pos['entry_price'],
+            'exit': exit_price,
+            'pnl': pnl,
+            'reason': reason
+        })
+
     def get_total_equity(self) -> float:
         floating_pnl = 0.0
         locked_margin = 0.0
@@ -222,6 +234,15 @@ class OBIScalperEngine(BaseEngine):
                 'pnl': pnl_val
             })
         return results
+
+    async def close_position(self, order_id: str):
+        # order_id: BTC/USDT_LONG
+        symbol = order_id.rsplit('_', 1)[0]
+        if symbol in self.active_positions:
+            price = self.active_positions[symbol]['entry_price']
+            if symbol in self.cached_data:
+                price = self.cached_data[symbol]['price']
+            self._close_position(symbol, price, "MANUAL_CLOSE")
 
     async def shutdown(self):
         self.stop()

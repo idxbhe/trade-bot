@@ -26,6 +26,7 @@ class BaseEngine(ABC):
         self.status_message = "Engine initialized"
         self.verbose_queue = [] # Pretty logs for the UI
         self.latest_activity = "Engine ready" # Static status line
+        self.order_history = [] # List of closed orders
 
     def _push_log(self, category: str, icon: str, color: str, symbol: str, message: str):
         """Standardized log formatter for UI consistency."""
@@ -79,6 +80,15 @@ class BaseEngine(ABC):
     @abstractmethod
     async def get_active_orders(self) -> List[Dict[str, Any]]:
         """Return list of active orders/positions for the UI."""
+        pass
+
+    async def get_order_history(self) -> List[Dict[str, Any]]:
+        """Return history of closed orders."""
+        return self.order_history
+
+    @abstractmethod
+    async def close_position(self, order_id: str):
+        """Manually close a specific position by its ID."""
         pass
 
     @abstractmethod
