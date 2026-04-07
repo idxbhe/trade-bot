@@ -36,15 +36,27 @@ class TradingDashboard(App):
     #market-panel, #stats-container, #history-panel {
         height: 100%;
         width: 100%;
+        border: solid $primary-muted;
     }
     
-    #market-panel { border: solid green; }
-    #history-panel { border: solid yellow; }
+    #market-panel:focus-within {
+        border: thick $accent;
+        background: $surface-lighten-1;
+    }
+
+    #history-panel:focus-within {
+        border: thick $accent;
+        background: $surface-lighten-1;
+    }
+    
+    #market-panel { grid-column: 1; grid-row: 1; }
+    #history-panel { grid-column: 1; grid-row: 2; }
     
     #stats-container { 
-        border: solid blue; 
         padding: 1;
         row-span: 2;
+        grid-column: 2;
+        grid-row: 1 / 3;
     }
     
     BotStats {
@@ -173,6 +185,7 @@ class TradingDashboard(App):
         self.set_interval(0.5, self.flush_logs)
         self.set_interval(2.0, self.update_ui_sync)
         self.activity_ticker.message = "Engine activity will appear here..."
+        self.active_orders_table.focus()
 
     def flush_logs(self) -> None:
         """Route system logs (errors/warnings) to history buffer and active modal."""
