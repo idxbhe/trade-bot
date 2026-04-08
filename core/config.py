@@ -21,6 +21,9 @@ class Config:
     # Default Circuit Breaker: 5% total daily drawdown
     CIRCUIT_BREAKER_PCT = float(os.getenv("CIRCUIT_BREAKER_PCT", "0.05"))
     
+    # Master Safety Net: 10% total daily drawdown across all engines
+    MASTER_CIRCUIT_BREAKER_PCT = float(os.getenv("MASTER_CIRCUIT_BREAKER_PCT", "0.10"))
+    
     # Test Mode initial virtual balance
     TEST_INITIAL_BALANCE = float(os.getenv("TEST_INITIAL_BALANCE", "10000.0"))
     

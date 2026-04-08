@@ -8,8 +8,8 @@ class CircuitBreaker:
     Monitors overall account health and multi-timeframe PNL.
     Resets baselines at 07:00 AM on respective boundaries.
     """
-    def __init__(self):
-        self.max_daily_drawdown_pct = config.CIRCUIT_BREAKER_PCT # e.g., 0.05 (5%)
+    def __init__(self, max_daily_drawdown_pct: float = None):
+        self.max_daily_drawdown_pct = max_daily_drawdown_pct if max_daily_drawdown_pct is not None else config.CIRCUIT_BREAKER_PCT # e.g., 0.05 (5%)
         self.is_tripped = False
         
         # Baselines
@@ -131,5 +131,3 @@ class CircuitBreaker:
             'yearly_pnl': current_equity - self.baseline_yearly,
             'next_reset_in': f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         }
-
-circuit_breaker = CircuitBreaker()

@@ -40,6 +40,9 @@ class PlaceholderFuturesEngine(BaseEngine):
         self.report_info("Futures cycle complete.")
         self.current_phase = self.PHASE_IDLE
 
+    def get_total_equity(self) -> float:
+        return self.equity
+
     async def get_stats(self) -> Dict[str, Any]:
         return {
             'equity': self.equity,

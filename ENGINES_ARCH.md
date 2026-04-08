@@ -20,6 +20,14 @@ Every engine must inherit from `BaseEngine` (located in `engines/base_engine.py`
 2.  **Implement:** Subclass `BaseEngine` and fill in the mandatory methods.
 3.  **Register:** In `ui/dashboard.py`, import your new class and add it to either `self.spot_engines` or `self.futures_engines` in the `__init__` method.
 
+## Risk Management Architecture
+The bot uses a two-tier risk management system:
+
+1. **Per-Engine Risk (Local):** Each engine instance manages its own `PositionSizer` and `CircuitBreaker`. This allows for different risk profiles:
+   - **Aggressive Scalping:** Tight stop losses (ATR 1.2x) and low risk per trade (0.5%).
+   - **Hybrid/Swing:** Wider stop losses (ATR 2.5x) and moderate risk per trade (1.5%).
+2. **Master Safety Net (Global):** The `TradingDashboard` host maintains a master `CircuitBreaker` that monitors total equity across the active engine. If the total daily drawdown exceeds a global threshold (configurable via `MASTER_CIRCUIT_BREAKER_PCT` in `.env`), the bot will perform an emergency shutdown of the active engine.
+
 ## Operational Security
 - **Switching Lock:** Engine selection and Market selection are locked via the UI while the bot is `Running`. You must `Stop` the bot to switch.
 - **Manual Control:** Users can manually close any position by selecting it in the UI and pressing `c`.

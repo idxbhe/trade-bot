@@ -3,7 +3,7 @@ import time
 from typing import Dict, List, Any
 from engines.base_engine import BaseEngine
 from strategy.orderbook_imbalance import OrderBookImbalanceStrategy
-from risk.circuit_breaker import circuit_breaker
+from risk.circuit_breaker import CircuitBreaker
 
 class OBIScalperEngine(BaseEngine):
     """
@@ -38,6 +38,9 @@ class OBIScalperEngine(BaseEngine):
         self.equity = config.TEST_INITIAL_BALANCE
         self.initial_equity = config.TEST_INITIAL_BALANCE
         self.is_live = config.KUCOIN_ENV.lower() != 'sandbox'
+        
+        # OBI Scalping: Aggressive Circuit Breaker (3% daily)
+        self.circuit_breaker = CircuitBreaker(max_daily_drawdown_pct=0.03)
         
         self.logger.info(f"Engine {self.name} initialized. Leverage: {self.leverage}x")
 
@@ -116,7 +119,7 @@ class OBIScalperEngine(BaseEngine):
                 else: # No active position
                     self.current_phase = self.PHASE_RISK
                     if signal_data['signal'] in ['LONG', 'SHORT']:
-                        if circuit_breaker.update_equity(self.get_total_equity()):
+                        if self.circuit_breaker.update_equity(self.get_total_equity()):
                             self.current_phase = self.PHASE_EXEC
                             side = signal_data['signal']
                             
@@ -205,7 +208,7 @@ class OBIScalperEngine(BaseEngine):
 
     async def get_stats(self) -> Dict[str, Any]:
         total_equity = self.get_total_equity()
-        pnl_stats = circuit_breaker.get_pnl_stats(total_equity)
+        pnl_stats = self.circuit_breaker.get_pnl_stats(total_equity)
         
         return {
             'equity': total_equity,

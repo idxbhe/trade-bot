@@ -27,6 +27,10 @@ class BaseEngine(ABC):
         self.verbose_queue = [] # Pretty logs for the UI
         self.latest_activity = "Engine ready" # Static status line
         self.order_history = [] # List of closed orders
+        
+        # Risk Management (to be initialized by subclasses)
+        self.risk_manager = None
+        self.circuit_breaker = None
 
     def _push_log(self, category: str, icon: str, color: str, symbol: str, message: str):
         """Standardized log formatter for UI consistency."""
@@ -70,6 +74,11 @@ class BaseEngine(ABC):
         The main 'heartbeat' of the engine.
         Called periodically to perform scanning, filtering, and execution.
         """
+        pass
+
+    @abstractmethod
+    def get_total_equity(self) -> float:
+        """Return the current total equity (cash + open positions)."""
         pass
 
     @abstractmethod

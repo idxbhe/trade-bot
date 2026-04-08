@@ -3,6 +3,7 @@ from textual.widgets import Static, DataTable, OptionList, Button, RichLog
 from textual.screen import ModalScreen
 from textual.containers import Container, Horizontal
 from textual.reactive import reactive
+from textual.message import Message
 from rich.text import Text
 from rich.panel import Panel
 from rich.table import Table
@@ -220,9 +221,10 @@ class ActivityTicker(Static):
 
     def render(self) -> Text:
         spinner = self.SPINNER_FRAMES[self.frame_idx]
+        msg = str(self.message) if self.message is not None else "Engine Idle"
         return Text.assemble(
             (f" {spinner} ", "bold cyan"),
-            (self.message, "white")
+            (msg, "white")
         )
 
 class ActiveOrdersTable(DataTable):
@@ -230,6 +232,19 @@ class ActiveOrdersTable(DataTable):
     def on_mount(self) -> None:
         self.cursor_type = "row"
         self.col_keys = self.add_columns("Symbol", "Type", "Size (USD)", "Entry", "Current", "SL", "TP", "PnL")
+
+    async def on_key(self, event) -> None:
+        if event.key == "c":
+            if self.cursor_row is not None:
+                row_key = self.get_row_key_at(self.cursor_row)
+                order_id = str(row_key.value)
+                # We need to tell the app to close it
+                self.post_message(self.ManualCloseRequest(order_id))
+
+    class ManualCloseRequest(Message):
+        def __init__(self, order_id: str):
+            super().__init__()
+            self.order_id = order_id
 
     def update_order_data(self, order_id: str, symbol: str, side: str, size: float, entry: float, current: float, sl: float, tp: float, pnl: float):
         # Style logic

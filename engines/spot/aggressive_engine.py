@@ -5,8 +5,8 @@ from engines.base_engine import BaseEngine
 from data.fetcher import market_collector
 from data.indicators import Indicators
 from strategy.volatility_breakout import VolatilityBreakoutStrategy
-from risk.position_sizer import position_sizer
-from risk.circuit_breaker import circuit_breaker
+from risk.position_sizer import PositionSizer
+from risk.circuit_breaker import CircuitBreaker
 
 class AggressiveScalperEngine(BaseEngine):
     """
@@ -33,6 +33,12 @@ class AggressiveScalperEngine(BaseEngine):
         self.equity = config.TEST_INITIAL_BALANCE
         self.initial_equity = config.TEST_INITIAL_BALANCE
         self.is_live = config.KUCOIN_ENV.lower() != 'sandbox'
+        
+        # Aggressive Scalping: 0.5% risk per trade, 1.2x ATR stop loss
+        self.risk_manager = PositionSizer(max_risk_pct=0.005, atr_multiplier=1.2)
+        # Tight Circuit Breaker: 2% daily drawdown
+        self.circuit_breaker = CircuitBreaker(max_daily_drawdown_pct=0.02)
+        
         self.logger.info(f"Engine {self.name} initialized. Mode: {'LIVE' if self.is_live else 'TEST'}")
 
     async def update(self):
@@ -114,7 +120,7 @@ class AggressiveScalperEngine(BaseEngine):
                         sig = self.cached_data[symbol]['signal']
                         if sig['signal'] == 'BUY':
                             self.report_risk(symbol, "Validating fast scalp risk...")
-                            if circuit_breaker.update_equity(self.get_total_equity()):
+                            if self.circuit_breaker.update_equity(self.get_total_equity()):
                                 self.current_phase = self.PHASE_EXEC
                                 atr = self.cached_data[symbol]['df'].iloc[-1].get('atr_14', 0)
                                 if atr > 0:
@@ -122,7 +128,7 @@ class AggressiveScalperEngine(BaseEngine):
                                     sl = price - (1.0 * atr)
                                     tp = price + (1.5 * atr)
                                     # Using position_sizer to respect max risk
-                                    size, _ = position_sizer.calculate_position_size(self.equity, price, sl)
+                                    size, _ = self.risk_manager.calculate_position_size(self.equity, price, sl)
                                     if size > 0:
                                         self.report_execution(symbol, f"EXEC VOLATILITY SCALP {size:.4f} @ ${price:,.2f}")
                                         self._open_position(symbol, price, size, sl, tp)
@@ -181,7 +187,7 @@ class AggressiveScalperEngine(BaseEngine):
 
     async def get_stats(self) -> Dict[str, Any]:
         total_equity = self.get_total_equity()
-        pnl_stats = circuit_breaker.get_pnl_stats(total_equity)
+        pnl_stats = self.circuit_breaker.get_pnl_stats(total_equity)
         
         return {
             'equity': total_equity,

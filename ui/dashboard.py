@@ -12,6 +12,7 @@ from ui.components import ActiveOrdersTable, BotStats, SelectionModal, ActivityT
 from core.logger import log_queue
 from core.config import config
 from exchange.kucoin import kucoin_client, kucoin_futures_client
+from risk.circuit_breaker import CircuitBreaker
 
 # Engines Registry
 from engines.spot.hybrid_engine_v1 import HybridEngineV1
@@ -84,6 +85,9 @@ class TradingDashboard(App):
         
         self.engine = self.available_engines[self.engine_idx]()
         self.engine_initialized = False
+        
+        # MASTER SAFETY NET: Daily drawdown limit across the whole app
+        self.master_circuit_breaker = CircuitBreaker(max_daily_drawdown_pct=config.MASTER_CIRCUIT_BREAKER_PCT)
 
     def _load_bot_state(self):
         """Load market and engine selection from persistent storage."""
@@ -142,79 +146,118 @@ class TradingDashboard(App):
                 yield self.history_table
         yield Footer()
 
+    async def on_active_orders_table_manual_close_request(self, message: ActiveOrdersTable.ManualCloseRequest) -> None:
+        """Handle manual close request message from the orders table."""
+        order_id = message.order_id
+        self.activity_ticker.message = f"Requesting manual close for {order_id}..."
+        await self.engine.close_position(order_id)
+        # Re-fetch data immediately
+        await self.update_ui_sync()
+
     async def action_manual_close(self) -> None:
-        """Handle manual position close when 'c' key is pressed while ActiveOrdersTable is focused."""
-        if self.focused == self.active_orders_table:
-            row_idx = self.active_orders_table.cursor_row
-            if row_idx is not None:
-                try:
-                    row_key = self.active_orders_table.get_row_key_at(row_idx)
-                    order_id = str(row_key.value)
-                    if order_id:
-                        self.activity_ticker.message = f"Requesting manual close for {order_id}..."
-                        await self.engine.close_position(order_id)
-                        # Re-fetch data immediately
-                        await self.update_ui_sync()
-                except Exception:
-                    pass
+        """Handle manual position close when 'c' key is pressed (fallback for App binding)."""
+        row_idx = self.active_orders_table.cursor_row
+        if row_idx is not None:
+            try:
+                row_key = self.active_orders_table.get_row_key_at(row_idx)
+                order_id = str(row_key.value)
+                if order_id:
+                    self.activity_ticker.message = f"Requesting manual close for {order_id}..."
+                    await self.engine.close_position(order_id)
+                    await self.update_ui_sync()
+            except Exception as e:
+                self.activity_ticker.message = f"[bold red]Close Error:[/] {e}"
+        else:
+            self.activity_ticker.message = "[bold yellow]Select a position to close first.[/]"
 
     async def update_ui_sync(self):
         """Fetch data from the current active engine with robust error handling."""
+        # Safety: Ensure dashboard is fully mounted and widgets are ready
+        if not self.is_mounted:
+            return
+
+        # Defensive: Check if all expected widgets exist and are not None
+        widgets = ["bot_stats", "activity_ticker", "active_orders_table", "history_table"]
+        for w in widgets:
+            if not getattr(self, w, None):
+                return
+
+        # Defensive: Check engine
+        if not getattr(self, "engine", None):
+            return
+
         try:
             stats = await self.engine.get_stats()
-            orders = await self.engine.get_active_orders()
-            history = await self.engine.get_order_history()
+            if stats is None: stats = {}
             
-            self.sub_title = f"BOT MONITOR | Engine: {self.engine.name} | Balance: ${stats.get('equity', 0):,.2f}"
+            orders = await self.engine.get_active_orders()
+            if orders is None: orders = []
+            
+            history = await self.engine.get_order_history()
+            if history is None: history = []
+            
+            equity = stats.get('equity', 0)
+            self.sub_title = f"BOT MONITOR | Engine: {self.engine.name} | Balance: ${equity:,.2f}"
             self.bot_stats.stats_data = stats
             
             # Update the static activity ticker
-            self.activity_ticker.message = self.engine.latest_activity
+            activity = getattr(self.engine, "latest_activity", "Engine processing...")
+            self.activity_ticker.message = str(activity) if activity is not None else "Engine processing..."
             
-            # Clear verbose queue to keep it non-persistent as requested
-            self.engine.verbose_queue.clear()
+            # Clear verbose queue to keep it non-persistent
+            v_queue = getattr(self.engine, "verbose_queue", None)
+            if v_queue is not None:
+                v_queue.clear()
             
             # Update Active Orders
             new_order_ids = set()
-            if orders:
-                for item in orders:
-                    order_id = item['order_id']
-                    new_order_ids.add(order_id)
-                    self.active_orders_table.update_order_data(
-                        order_id=order_id, 
-                        symbol=item['symbol'], 
-                        side=item['side'], 
-                        size=item['size'], 
-                        entry=item['entry'], 
-                        current=item['current'], 
-                        sl=item['sl'], 
-                        tp=item['tp'], 
-                        pnl=item['pnl']
-                    )
+            for item in orders:
+                if not item or 'order_id' not in item: continue
+                order_id = item['order_id']
+                new_order_ids.add(order_id)
+                self.active_orders_table.update_order_data(
+                    order_id=order_id, 
+                    symbol=item.get('symbol', '???'), 
+                    side=item.get('side', '???'), 
+                    size=item.get('size', 0), 
+                    entry=item.get('entry', 0), 
+                    current=item.get('current', 0), 
+                    sl=item.get('sl', 0), 
+                    tp=item.get('tp', 0), 
+                    pnl=item.get('pnl', 0)
+                )
 
             # Remove positions that are no longer active
-            current_rows = [str(k.value) for k in self.active_orders_table.rows.keys()]
-            for row_id in current_rows:
-                if row_id not in new_order_ids:
-                    self.active_orders_table.remove_row(row_id)
+            try:
+                # Textual DataTable rows keys can be accessed safely via .rows
+                current_row_keys = list(self.active_orders_table.rows.keys())
+                for row_key in current_row_keys:
+                    row_id = str(row_key.value)
+                    if row_id not in new_order_ids:
+                        self.active_orders_table.remove_row(row_key)
+            except Exception:
+                pass
 
             # Update History Table
-            if history:
-                # Show only last 20 entries
-                recent_history = history[-20:]
-                # For history, it's safer to clear and re-add or just add new ones
-                # Since history is read-only and growing, we'll just check count
-                if self.history_table.row_count != len(recent_history):
-                    self.history_table.clear()
-                    for item in recent_history:
-                        self.history_table.add_history_entry(
-                            item['time'], item['symbol'], item['side'], 
-                            item['amount'], item['exit'], item['pnl'], 
-                            item.get('max_pnl', 0.0), item.get('min_pnl', 0.0),
-                            item['reason']
-                        )
+            # Show only last 20 entries
+            recent_history = history[-20:] if history else []
+            if self.history_table.row_count != len(recent_history):
+                self.history_table.clear()
+                for item in recent_history:
+                    self.history_table.add_history_entry(
+                        item.get('time', '??:??:??'), 
+                        item.get('symbol', '???'), 
+                        item.get('side', '???'), 
+                        item.get('amount', 0), 
+                        item.get('exit', 0), 
+                        item.get('pnl', 0), 
+                        item.get('max_pnl', 0.0), 
+                        item.get('min_pnl', 0.0),
+                        item.get('reason', 'UNKNOWN')
+                    )
         except Exception as e:
-            self.activity_ticker.message = f"[bold red]UI Error:[/] {e}"
+            if hasattr(self, "activity_ticker") and self.activity_ticker:
+                self.activity_ticker.message = f"[bold red]UI Error:[/] {str(e)}"
 
     def on_mount(self) -> None:
         self.title = "🤖 KUCOIN TRADE BOT"
@@ -308,21 +351,34 @@ class TradingDashboard(App):
     async def run_bot_worker(self) -> None:
         while self.bot_running:
             try:
-                # Tell engine to log verbosely to its internal status_message 
-                # or we can pass the engine_log widget handle.
-                # Standard choice: Let the engine update its status_message, 
-                # and we display it in the log.
+                # 0. Safety: Check engine
+                if not getattr(self, "engine", None):
+                    await asyncio.sleep(1)
+                    continue
+
+                # 1. Check Master Safety Net
+                total_equity = self.engine.get_total_equity()
+                if not self.master_circuit_breaker.update_equity(total_equity):
+                    if self.is_mounted and hasattr(self, "activity_ticker"):
+                        self.activity_ticker.message = "[bold red]MASTER CIRCUIT BREAKER TRIPPED! Stopping Bot...[/]"
+                    self.bot_running = False
+                    self.engine.stop()
+                    break
+
+                # 2. Update Engine
                 await self.engine.update()
                 
-                # Write current engine status to verbose log
-                stats = await self.engine.get_stats()
-                msg = stats.get('status_message', '')
-                if msg:
-                    self.activity_ticker.message = msg
+                # 3. Update Activity Ticker from Stats
+                if self.is_mounted and hasattr(self, "activity_ticker"):
+                    stats = await self.engine.get_stats()
+                    msg = stats.get('status_message', '') if stats else ''
+                    if msg:
+                        self.activity_ticker.message = str(msg)
                 
                 await asyncio.sleep(0.5) 
             except Exception as e:
-                self.log_widget.write(f"[bold red]Engine Error: {e}[/bold red]")
+                # Standardize logging to history since log_widget is modal-only
+                self.log_history.append(f"[bold red]Engine Error:[/] {str(e)}")
                 await asyncio.sleep(5)
 
     async def action_quit_app(self) -> None:

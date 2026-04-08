@@ -61,12 +61,16 @@ class MyNewEngine(BaseEngine):
     async def get_stats(self) -> dict:
         """REQUIRED: Return data for the 'Bot Status' panel."""
         return {
-            'equity': 1000.0,
+            'equity': self.get_total_equity(),
             'mode': 'TEST', 
             'active_pos_count': len(self.active_positions),
             'total_pnl': 0.0,
             # ... other metrics ...
         }
+
+    def get_total_equity(self) -> float:
+        """REQUIRED: Return current total equity (cash + open positions)."""
+        return self.equity
 
     async def get_active_orders(self) -> list:
         """REQUIRED: Return list of dictionaries for ActiveOrdersTable."""
@@ -104,10 +108,10 @@ class MyNewEngine(BaseEngine):
 - **Throttling:** Do not spam the exchange API. Use a minimum delay of `1.0s` between checking different symbols.
 - **Caching:** Only fetch heavy data (like OHLCV/Candles) once every 60 seconds. Use ticker/last price for real-time monitoring between candle updates.
 
-### C. Standardized Components
-- Use `data.fetcher.market_collector` for all API calls (includes retries/rate-limit handling).
-- Use `data.indicators.Indicators` for all TA math to ensure consistency across engines.
-- Use `risk.circuit_breaker` before opening ANY new position.
+### C. Standardized Risk Management
+- **Local Risk:** Always initialize `self.risk_manager = PositionSizer(...)` and `self.circuit_breaker = CircuitBreaker(...)` in the `setup()` method.
+- **Circuit Breaker Check:** Always call `self.circuit_breaker.update_equity(self.get_total_equity())` before opening ANY new position.
+- **Sizing:** Use `self.risk_manager.calculate_position_size(...)` to calculate orders.
 
 ### D. UI Synchronization
 - `get_stats()`, `get_active_orders()`, and `get_order_history()` should be **fast**. They should read from the engine's internal memory/cache, not perform new API requests.
