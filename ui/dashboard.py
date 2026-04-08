@@ -49,9 +49,6 @@ class TradingDashboard(App):
         background: $surface-lighten-1;
     }
     
-    #market-panel { grid-column: 1; grid-row: 1; }
-    #history-panel { grid-column: 1; grid-row: 2; }
-    
     #stats-container { 
         padding: 1;
         column-span: 1;
