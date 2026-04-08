@@ -39,16 +39,6 @@ class TradingDashboard(App):
         border: solid $primary-muted;
     }
     
-    #market-panel:focus-within {
-        border: thick $accent;
-        background: $surface-lighten-1;
-    }
-
-    #history-panel:focus-within {
-        border: thick $accent;
-        background: $surface-lighten-1;
-    }
-    
     #stats-container { 
         padding: 1;
         column-span: 1;
@@ -147,11 +137,13 @@ class TradingDashboard(App):
             self.engine.verbose_queue.clear()
             
             # Update Active Orders
-            self.active_orders_table.clear()
+            new_order_ids = set()
             if orders:
                 for item in orders:
+                    order_id = item['order_id']
+                    new_order_ids.add(order_id)
                     self.active_orders_table.update_order_data(
-                        order_id=item['order_id'], 
+                        order_id=order_id, 
                         symbol=item['symbol'], 
                         side=item['side'], 
                         size=item['size'], 
@@ -161,18 +153,28 @@ class TradingDashboard(App):
                         tp=item['tp'], 
                         pnl=item['pnl']
                     )
-            
+
+            # Remove positions that are no longer active
+            current_rows = [str(k.value) for k in self.active_orders_table.rows.keys()]
+            for row_id in current_rows:
+                if row_id not in new_order_ids:
+                    self.active_orders_table.remove_row(row_id)
+
             # Update History Table
-            self.history_table.clear()
             if history:
-                # Show only last 20 entries for performance
-                for item in history[-20:]:
-                    self.history_table.add_history_entry(
-                        item['time'], item['symbol'], item['side'], 
-                        item['amount'], item['exit'], item['pnl'], 
-                        item.get('max_pnl', 0.0), item.get('min_pnl', 0.0),
-                        item['reason']
-                    )
+                # Show only last 20 entries
+                recent_history = history[-20:]
+                # For history, it's safer to clear and re-add or just add new ones
+                # Since history is read-only and growing, we'll just check count
+                if self.history_table.row_count != len(recent_history):
+                    self.history_table.clear()
+                    for item in recent_history:
+                        self.history_table.add_history_entry(
+                            item['time'], item['symbol'], item['side'], 
+                            item['amount'], item['exit'], item['pnl'], 
+                            item.get('max_pnl', 0.0), item.get('min_pnl', 0.0),
+                            item['reason']
+                        )
         except Exception as e:
             self.activity_ticker.message = f"[bold red]UI Error:[/] {e}"
 
