@@ -18,7 +18,7 @@ class LogModal(ModalScreen):
     #log-modal-container {
         width: 90%;
         height: 85%;
-        border: thick $primary;
+        border: solid $primary;
         background: $surface;
         padding: 1;
     }
@@ -76,7 +76,7 @@ class SelectionModal(ModalScreen):
     #modal-container {
         width: 40;
         height: auto;
-        border: thick $primary;
+        border: solid $primary;
         background: $surface;
         padding: 1;
     }

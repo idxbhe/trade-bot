@@ -1,6 +1,8 @@
 import asyncio
 import traceback
 import time
+import json
+import os
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, RichLog, DataTable
 from textual.containers import Grid, Container, Vertical
@@ -77,11 +79,47 @@ class TradingDashboard(App):
         self.spot_engines = [HybridEngineV1, ScannerOnlyEngine, AggressiveScalperEngine]
         self.futures_engines = [OBIScalperEngine, PlaceholderFuturesEngine]
         
-        self.current_market = "Spot"
-        self.available_engines = self.spot_engines
-        self.engine_idx = 0
+        self.state_file = ".bot_state.json"
+        self._load_bot_state()
+        
         self.engine = self.available_engines[self.engine_idx]()
         self.engine_initialized = False
+
+    def _load_bot_state(self):
+        """Load market and engine selection from persistent storage."""
+        default_market = "Spot"
+        default_engine_name = "HybridEngine_V1"
+        
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file, 'r') as f:
+                    state = json.load(f)
+                    default_market = state.get("current_market", "Spot")
+                    default_engine_name = state.get("engine_name", "HybridEngine_V1")
+            except Exception:
+                pass
+        
+        self.current_market = default_market
+        self.available_engines = self.spot_engines if self.current_market == "Spot" else self.futures_engines
+        
+        # Find engine index by name
+        self.engine_idx = 0
+        for i, eng_cls in enumerate(self.available_engines):
+            if eng_cls().name == default_engine_name:
+                self.engine_idx = i
+                break
+
+    def save_bot_state(self):
+        """Save current market and engine selection to persistent storage."""
+        try:
+            state = {
+                "current_market": self.current_market,
+                "engine_name": self.engine.name
+            }
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f)
+        except Exception as e:
+            self.log_history.append(f"[bold red]Failed to save state:[/] {e}")
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -213,6 +251,7 @@ class TradingDashboard(App):
                 self.current_market = selected_market
                 self.available_engines = self.spot_engines if self.current_market == "Spot" else self.futures_engines
                 asyncio.create_task(self.perform_engine_swap(0))
+                # Note: save_bot_state is called inside perform_engine_swap
 
         self.push_screen(
             SelectionModal("Pilih Market", [("Spot Market", "Spot"), ("Futures Market", "Futures")]),
@@ -231,6 +270,7 @@ class TradingDashboard(App):
                 new_engine_name = self.available_engines[selected_idx]().name
                 self.activity_ticker.message = f"Switching to engine {new_engine_name}..."
                 asyncio.create_task(self.perform_engine_swap(selected_idx))
+                # Note: save_bot_state is called inside perform_engine_swap
 
         self.push_screen(
             SelectionModal(f"Pilih Engine {self.current_market}", engine_options),
@@ -247,6 +287,7 @@ class TradingDashboard(App):
         self.engine = self.available_engines[self.engine_idx]()
         self.engine_initialized = False
         self.activity_ticker.message = f"Swapped to {self.engine.name}."
+        self.save_bot_state()
 
     async def action_toggle_bot(self) -> None:
         if not self.bot_running:
