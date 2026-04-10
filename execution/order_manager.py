@@ -60,9 +60,9 @@ class OrderManager:
                 await self.client.exchange.cancel_all_orders(symbol)
                 logger.info(f"Cancelled all active orders for {symbol}")
             else:
-                # Some exchanges require a symbol, KuCoin allows global cancel if supported by CCXT
-                await self.client.exchange.cancel_all_orders()
-                logger.info("Cancelled all active orders globally")
+                # Global cancel is too risky in a multi-bot environment
+                logger.warning("Global cancel requested but blocked to prevent cancelling non-bot orders. Please provide a specific symbol.")
+                return
         except Exception as e:
             logger.error(f"Failed to cancel orders: {e}")
 

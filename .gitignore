@@ -41,6 +41,8 @@ headless_output.txt
 # Databases
 *.db
 *.sqlite3
+*.db-shm
+*.db-wal
 
 # IDEs
 .vscode/

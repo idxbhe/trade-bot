@@ -143,7 +143,7 @@ class OBIScalperEngine(BaseEngine):
                                     tp = price * (1 + self.tp_pct) if side == 'LONG' else price * (1 - self.tp_pct)
                                     
                                     self.report_execution(symbol, f"EXEC {side} {size:.4f}x leverage @ ${price:,.2f}")
-                                    self._open_position(symbol, side, price, size, sl, tp)
+                                    await self._open_position(symbol, side, price, size, sl, tp)
 
                     self.current_phase = self.PHASE_SYNC
                     await asyncio.sleep(0.3) # Extremely fast loop for HFT
@@ -158,13 +158,37 @@ class OBIScalperEngine(BaseEngine):
         finally:
             self._is_updating = False
 
-    def _open_position(self, symbol: str, side: str, price: float, amount: float, sl: float, tp: float):
+    async def _open_position(self, symbol: str, side: str, price: float, amount: float, sl: float, tp: float):
+        if self.is_live:
+            # KuCoin futures limit order
+            try:
+                await self.exchange.load_markets()
+                ccxt_side = 'buy' if side == 'LONG' else 'sell'
+                
+                formatted_amount = self.exchange.amount_to_precision(symbol, amount)
+                formatted_price = self.exchange.price_to_precision(symbol, price)
+                
+                self.report_execution(symbol, f"Executing LIVE {side} {amount:.4f} @ ${price:,.2f}")
+                order = await self.exchange.create_order(
+                    symbol=symbol,
+                    type='limit',
+                    side=ccxt_side,
+                    amount=float(formatted_amount),
+                    price=float(formatted_price),
+                    params={'postOnly': True, 'leverage': self.leverage}
+                )
+                if not order:
+                    self.report_info(f"[{symbol}] LIVE order failed. Skipping position.")
+                    return
+            except Exception as e:
+                self.logger.error(f"Failed to execute LIVE {side} order for {symbol}: {e}")
+                return
 
         # In futures, margin required is (price * amount) / leverage
         margin_required = (price * amount) / self.leverage
         self.equity -= margin_required # Lock margin
         
-        self.active_positions[symbol] = {
+        pos = {
             'side': side,
             'entry_price': price,
             'amount': amount,
@@ -174,10 +198,33 @@ class OBIScalperEngine(BaseEngine):
             'max_pnl': 0.0,
             'min_pnl': 0.0
         }
+        self.active_positions[symbol] = pos
+        await self.save_active_position(symbol, pos, side=side)
         self.report_info(f"[{symbol}] OPEN {side} {amount:.4f} @ ${price:,.2f} | Mar: ${margin_required:,.2f}")
 
     async def _close_position(self, symbol: str, exit_price: float, reason: str):
         pos = self.active_positions.pop(symbol)
+        await self.remove_active_position(symbol)
+        
+        if self.is_live:
+            try:
+                await self.exchange.load_markets()
+                ccxt_side = 'sell' if pos['side'] == 'LONG' else 'buy'
+                
+                formatted_amount = self.exchange.amount_to_precision(symbol, pos['amount'])
+                formatted_price = self.exchange.price_to_precision(symbol, exit_price)
+                
+                self.report_execution(symbol, f"Executing LIVE {ccxt_side.upper()} {pos['amount']:.4f} @ ${exit_price:,.2f}")
+                await self.exchange.create_order(
+                    symbol=symbol,
+                    type='limit',
+                    side=ccxt_side,
+                    amount=float(formatted_amount),
+                    price=float(formatted_price),
+                    params={'postOnly': True, 'leverage': self.leverage}
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to execute LIVE close order for {symbol}: {e}")
         
         # Calculate PnL based on side
         if pos['side'] == 'LONG':

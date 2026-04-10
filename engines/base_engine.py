@@ -30,6 +30,7 @@ class BaseEngine(ABC):
         self.market = "Spot" # Default, updated in subclasses
         self.mode = "TEST" # Default, updated in subclasses
         self._is_updating = False
+        self._cached_stats = None
         
         # Risk Management (to be initialized by subclasses)
         self.risk_manager = None
@@ -58,6 +59,7 @@ class BaseEngine(ABC):
                 )
                 session.add(new_record)
                 await session.commit()
+                self._cached_stats = None
         except Exception as e:
             self.logger.error(f"Failed to save order history for {self.name}: {e}")
 
@@ -180,6 +182,9 @@ class BaseEngine(ABC):
 
     async def get_historical_stats(self) -> Dict[str, Any]:
         """Calculate aggregate performance stats from the database."""
+        if self._cached_stats is not None:
+            return self._cached_stats
+            
         try:
             from core.database import async_session
             from models.trade_history import TradeHistory
@@ -250,7 +255,7 @@ class BaseEngine(ABC):
                 
                 win_rate = (wins / trade_count * 100) if trade_count > 0 else 0.0
                 
-                return {
+                self._cached_stats = {
                     "historical_pnl": total_pnl,
                     "today_pnl": today_pnl,
                     "week_pnl": week_pnl,
@@ -259,6 +264,7 @@ class BaseEngine(ABC):
                     "trade_count": trade_count,
                     "win_rate": win_rate
                 }
+                return self._cached_stats
         except Exception as e:
             self.logger.error(f"Error fetching historical stats for {self.name}: {e}")
             return {
@@ -387,6 +393,7 @@ class BaseEngine(ABC):
                 self.circuit_breaker.baseline_yearly = None
                 self.circuit_breaker.is_tripped = False
 
+            self._cached_stats = None
             self.logger.info(f"All data cleared and status reset for engine '{self.name}'.")
         except Exception as e:
             self.logger.error(f"Failed to clear data for {self.name}: {e}")

@@ -7,6 +7,7 @@ from data.indicators import Indicators
 from strategy.volatility_breakout import VolatilityBreakoutStrategy
 from risk.position_sizer import PositionSizer
 from risk.circuit_breaker import CircuitBreaker
+from execution.order_manager import order_manager
 
 class AggressiveScalperEngine(BaseEngine):
     """
@@ -152,6 +153,13 @@ class AggressiveScalperEngine(BaseEngine):
             self._is_updating = False
 
     async def _open_position(self, symbol: str, price: float, amount: float, sl: float, tp: float):
+        if self.is_live:
+            self.report_execution(symbol, f"Executing LIVE BUY {amount:.4f} @ ${price:,.2f}")
+            order = await order_manager.execute_limit_order(symbol, 'buy', amount, price)
+            if not order:
+                self.report_info(f"[{symbol}] LIVE order failed. Skipping position.")
+                return
+
         cost = price * amount
         self.equity -= cost
         pos = {
@@ -169,6 +177,11 @@ class AggressiveScalperEngine(BaseEngine):
     async def _close_position(self, symbol: str, price: float, reason: str):
         pos = self.active_positions.pop(symbol)
         await self.remove_active_position(symbol)
+
+        if self.is_live:
+            self.report_execution(symbol, f"Executing LIVE SELL {pos['amount']:.4f} @ ${price:,.2f}")
+            await order_manager.execute_limit_order(symbol, 'sell', pos['amount'], price)
+
         revenue = price * pos['amount']
         self.equity += revenue
         pnl = revenue - (pos['entry_price'] * pos['amount'])

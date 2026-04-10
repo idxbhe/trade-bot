@@ -1,5 +1,6 @@
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import text
 from sqlalchemy.orm import declarative_base
 from core.config import config
 
@@ -25,6 +26,8 @@ import models.trade_history
 async def init_db():
     """Initialize database tables"""
     async with engine.begin() as conn:
+        # Enable WAL mode for better concurrency
+        await conn.execute(text("PRAGMA journal_mode=WAL;"))
         # Create all tables (in a real app, use Alembic for migrations)
         await conn.run_sync(Base.metadata.create_all)
 
