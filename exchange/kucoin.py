@@ -67,6 +67,20 @@ class KuCoinClient:
     async def fetch_ohlcv(self, symbol: str, timeframe: str = '15m', limit: int = 100):
         return await self._safe_call(self.exchange.fetch_ohlcv, symbol, timeframe, limit=limit)
 
+    async def load_markets(self):
+        if not self.exchange.markets:
+            await self._safe_call(self.exchange.load_markets)
+
+    async def get_market_limits(self, symbol: str):
+        await self.load_markets()
+        if self.exchange.markets and symbol in self.exchange.markets:
+            market = self.exchange.markets[symbol]
+            return {
+                'precision': market.get('precision', {}),
+                'limits': market.get('limits', {})
+            }
+        return None
+
     async def close(self):
         if self.exchange:
             await self.exchange.close()

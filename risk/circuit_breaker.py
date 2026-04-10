@@ -61,12 +61,13 @@ class CircuitBreaker:
             
         return now
 
-    def update_equity(self, current_equity: float) -> bool:
+    def update_equity(self, current_equity: float, engine_name: str = "Unknown") -> bool:
         """
         Checks current equity against baselines and handles resets.
         Returns True if trading is ALLOWED, False if Circuit Breaker is TRIPPED.
         """
         now = datetime.now()
+        changed = False
         
         # 1. Handle Resets & Initializations
         # Daily
@@ -75,28 +76,32 @@ class CircuitBreaker:
             self.baseline_daily = current_equity
             self.last_reset_daily = now
             self.is_tripped = False # Reset trip status on daily reset
-            logger.info(f"Daily baseline reset: ${self.baseline_daily:,.2f}")
+            logger.info(f"[{engine_name}] Daily baseline reset: ${self.baseline_daily:,.2f}")
+            changed = True
 
         # Weekly
         weekly_boundary = self._get_reset_boundary('weekly')
         if self.baseline_weekly is None or (self.last_reset_weekly and self.last_reset_weekly < weekly_boundary):
             self.baseline_weekly = current_equity
             self.last_reset_weekly = now
-            logger.info(f"Weekly baseline reset: ${self.baseline_weekly:,.2f}")
+            logger.info(f"[{engine_name}] Weekly baseline reset: ${self.baseline_weekly:,.2f}")
+            changed = True
 
         # Monthly
         monthly_boundary = self._get_reset_boundary('monthly')
         if self.baseline_monthly is None or (self.last_reset_monthly and self.last_reset_monthly < monthly_boundary):
             self.baseline_monthly = current_equity
             self.last_reset_monthly = now
-            logger.info(f"Monthly baseline reset: ${self.baseline_monthly:,.2f}")
+            logger.info(f"[{engine_name}] Monthly baseline reset: ${self.baseline_monthly:,.2f}")
+            changed = True
 
         # Yearly
         yearly_boundary = self._get_reset_boundary('yearly')
         if self.baseline_yearly is None or (self.last_reset_yearly and self.last_reset_yearly < yearly_boundary):
             self.baseline_yearly = current_equity
             self.last_reset_yearly = now
-            logger.info(f"Yearly baseline reset: ${self.baseline_yearly:,.2f}")
+            logger.info(f"[{engine_name}] Yearly baseline reset: ${self.baseline_yearly:,.2f}")
+            changed = True
 
         # 2. Risk Check (Daily Drawdown)
         if self.is_tripped:
@@ -105,10 +110,74 @@ class CircuitBreaker:
         drawdown_pct = (self.baseline_daily - current_equity) / self.baseline_daily
         if drawdown_pct >= self.max_daily_drawdown_pct:
             self.is_tripped = True
-            logger.critical(f"CIRCUIT BREAKER TRIPPED! Drawdown ({drawdown_pct*100:.2f}%) exceeded limit.")
+            logger.critical(f"[{engine_name}] CIRCUIT BREAKER TRIPPED! Drawdown ({drawdown_pct*100:.2f}%) exceeded limit.")
             return False
             
         return True
+
+    async def load_baselines(self, engine_name: str):
+        """Load equity baselines from database."""
+        try:
+            from core.database import async_session
+            from models.trade_history import EquityBaseline
+            from sqlalchemy.future import select
+            
+            async with async_session() as session:
+                stmt = select(EquityBaseline).where(EquityBaseline.engine_name == engine_name)
+                result = await session.execute(stmt)
+                record = result.scalars().first()
+                
+                if record:
+                    self.baseline_daily = record.daily
+                    self.baseline_weekly = record.weekly
+                    self.baseline_monthly = record.monthly
+                    self.baseline_yearly = record.yearly
+                    self.last_reset_daily = record.last_reset_daily
+                    self.last_reset_weekly = record.last_reset_weekly
+                    self.last_reset_monthly = record.last_reset_monthly
+                    self.last_reset_yearly = record.last_reset_yearly
+                    logger.info(f"[{engine_name}] Equity baselines loaded from database.")
+        except Exception as e:
+            logger.error(f"Failed to load baselines for {engine_name}: {e}")
+
+    async def save_baselines(self, engine_name: str):
+        """Save current equity baselines to database."""
+        try:
+            from core.database import async_session
+            from models.trade_history import EquityBaseline
+            from sqlalchemy.future import select
+            
+            async with async_session() as session:
+                stmt = select(EquityBaseline).where(EquityBaseline.engine_name == engine_name)
+                result = await session.execute(stmt)
+                record = result.scalars().first()
+                
+                if record:
+                    record.daily = self.baseline_daily
+                    record.weekly = self.baseline_weekly
+                    record.monthly = self.baseline_monthly
+                    record.yearly = self.baseline_yearly
+                    record.last_reset_daily = self.last_reset_daily
+                    record.last_reset_weekly = self.last_reset_weekly
+                    record.last_reset_monthly = self.last_reset_monthly
+                    record.last_reset_yearly = self.last_reset_yearly
+                else:
+                    new_record = EquityBaseline(
+                        engine_name=engine_name,
+                        daily=self.baseline_daily,
+                        weekly=self.baseline_weekly,
+                        monthly=self.baseline_monthly,
+                        yearly=self.baseline_yearly,
+                        last_reset_daily=self.last_reset_daily,
+                        last_reset_weekly=self.last_reset_weekly,
+                        last_reset_monthly=self.last_reset_monthly,
+                        last_reset_yearly=self.last_reset_yearly
+                    )
+                    session.add(new_record)
+                await session.commit()
+        except Exception as e:
+            logger.error(f"Failed to save baselines for {engine_name}: {e}")
+
 
     def get_pnl_stats(self, current_equity: float) -> Dict[str, Any]:
         """Returns all timeframe PnL stats and reset timers."""
@@ -131,3 +200,5 @@ class CircuitBreaker:
             'yearly_pnl': current_equity - self.baseline_yearly,
             'next_reset_in': f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         }
+
+circuit_breaker = CircuitBreaker()

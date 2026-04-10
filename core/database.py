@@ -20,6 +20,8 @@ async_session = async_sessionmaker(
 # Declarative base for models
 Base = declarative_base()
 
+import models.trade_history
+
 async def init_db():
     """Initialize database tables"""
     async with engine.begin() as conn:

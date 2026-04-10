@@ -30,6 +30,8 @@ class OBIScalperEngine(BaseEngine):
         self.equity = config.TEST_INITIAL_BALANCE
         self.initial_equity = config.TEST_INITIAL_BALANCE
         self.is_live = config.KUCOIN_ENV.lower() != 'sandbox'
+        self.mode = 'LIVE' if self.is_live else 'TEST'
+        self.market = 'Futures'
 
     async def setup(self, exchange_client: Any, config: Any):
         self.exchange = exchange_client
@@ -41,114 +43,123 @@ class OBIScalperEngine(BaseEngine):
         
         # OBI Scalping: Aggressive Circuit Breaker (3% daily)
         self.circuit_breaker = CircuitBreaker(max_daily_drawdown_pct=0.03)
+        await self.circuit_breaker.load_baselines(self.name)
         
         self.logger.info(f"Engine {self.name} initialized. Leverage: {self.leverage}x")
 
     async def update(self):
-        if not self.is_running:
+        if not self.is_running or getattr(self, '_is_updating', False):
             self.current_phase = self.PHASE_IDLE
             return
             
-        self.current_phase = self.PHASE_SCAN
-        self.report_info("Scanning Order Book Imbalances (Futures)...")
-        
-        for symbol in self.symbols_to_monitor:
-            if not self.is_running: break
-            try:
-                self.current_phase = self.PHASE_DATA
-                self.report_scan(symbol, "Fetching order book depth...")
-                
-                # Fetch order book and ticker
-                ob = await self.exchange.fetch_order_book(symbol, limit=20)
-                ticker = await self.exchange.fetch_ticker(symbol)
-                
-                if not ob or not ticker:
-                    continue
+        self._is_updating = True
+        try:
+            self.current_phase = self.PHASE_SCAN
+            self.report_info("Scanning Order Book Imbalances (Futures)...")
+            
+            for symbol in self.symbols_to_monitor:
+                if not self.is_running: break
+                try:
+                    self.current_phase = self.PHASE_DATA
+                    self.report_scan(symbol, "Fetching order book depth...")
                     
-                price = float(ticker['last'])
-                now = time.time()
-                
-                self.current_phase = self.PHASE_ANALYZE
-                signal_data = self.strategy.evaluate_orderbook(ob)
-                obi_val = signal_data.get('obi', 0.5)
-                
-                # Cache data for UI
-                self.cached_data[symbol] = {
-                    'price': price,
-                    'obi': obi_val,
-                    'signal': signal_data,
-                    'last_update': now
-                }
-                
-                if signal_data['signal'] != 'HOLD':
-                    self.report_analyze(symbol, f"Imbalance Trigger: [bold]{signal_data['signal']}[/] ({obi_val*100:.1f}% Bids)")
+                    # Fetch order book and ticker
+                    ob = await self.exchange.fetch_order_book(symbol, limit=20)
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    
+                    if not ob or not ticker:
+                        continue
+                        
+                    price = float(ticker['last'])
+                    now = time.time()
+                    
+                    self.current_phase = self.PHASE_ANALYZE
+                    signal_data = self.strategy.evaluate_orderbook(ob)
+                    obi_val = signal_data.get('obi', 0.5)
+                    
+                    # Cache data for UI
+                    self.cached_data[symbol] = {
+                        'price': price,
+                        'obi': obi_val,
+                        'signal': signal_data,
+                        'last_update': now
+                    }
+                    
+                    if signal_data['signal'] != 'HOLD':
+                        self.report_analyze(symbol, f"Imbalance Trigger: [bold]{signal_data['signal']}[/] ({obi_val*100:.1f}% Bids)")
 
-                # Monitoring
-                if symbol in self.active_positions:
-                    self.current_phase = self.PHASE_RISK
-                    pos = self.active_positions[symbol]
+                    # Monitoring
+                    if symbol in self.active_positions:
+                        self.current_phase = self.PHASE_RISK
+                        pos = self.active_positions[symbol]
 
-                    # Update Max/Min Floating PnL
-                    if pos['side'] == 'LONG':
-                        floating_pnl = (price - pos['entry_price']) * pos['amount']
-                    else: # SHORT
-                        floating_pnl = (pos['entry_price'] - price) * pos['amount']
+                        # Update Max/Min Floating PnL
+                        if pos['side'] == 'LONG':
+                            floating_pnl = (price - pos['entry_price']) * pos['amount']
+                        else: # SHORT
+                            floating_pnl = (pos['entry_price'] - price) * pos['amount']
 
-                    pos['max_pnl'] = max(pos.get('max_pnl', 0.0), floating_pnl)
-                    pos['min_pnl'] = min(pos.get('min_pnl', 0.0), floating_pnl)
+                        pos['max_pnl'] = max(pos.get('max_pnl', 0.0), floating_pnl)
+                        pos['min_pnl'] = min(pos.get('min_pnl', 0.0), floating_pnl)
 
-                    if pos['side'] == 'LONG':
-                        if price >= pos['take_profit']:
-                            self.current_phase = self.PHASE_EXEC
-                            self.report_execution(symbol, f"LONG TP HIT @ ${price:,.2f}")
-                            self._close_position(symbol, price, "TAKE_PROFIT")
-                        elif price <= pos['stop_loss']:
-                            self.current_phase = self.PHASE_EXEC
-                            self.report_execution(symbol, f"LONG SL HIT @ ${price:,.2f}")
-                            self._close_position(symbol, price, "STOP_LOSS")
-                    else: # SHORT
-                        if price <= pos['take_profit']:
-                            self.current_phase = self.PHASE_EXEC
-                            self.report_execution(symbol, f"SHORT TP HIT @ ${price:,.2f}")
-                            self._close_position(symbol, price, "TAKE_PROFIT")
-                        elif price >= pos['stop_loss']:
-                            self.current_phase = self.PHASE_EXEC
-                            self.report_execution(symbol, f"SHORT SL HIT @ ${price:,.2f}")
-                            self._close_position(symbol, price, "STOP_LOSS")
-                            
-                else: # No active position
-                    self.current_phase = self.PHASE_RISK
-                    if signal_data['signal'] in ['LONG', 'SHORT']:
-                        if self.circuit_breaker.update_equity(self.get_total_equity()):
-                            self.current_phase = self.PHASE_EXEC
-                            side = signal_data['signal']
-                            
-                            # Futures Sizing: (Equity * Risk) / Price_Risk
-                            # Price risk is entry * sl_pct
-                            price_risk = price * self.sl_pct
-                            risk_usd = self.equity * self.risk_per_trade_pct
-                            size = risk_usd / price_risk
-                            
-                            # Check if size exceeds leveraged buying power
-                            max_size = (self.equity * self.leverage) / price
-                            size = min(size, max_size * 0.95) # 95% to leave room for fees
-                            
-                            if size > 0:
-                                sl = price * (1 - self.sl_pct) if side == 'LONG' else price * (1 + self.sl_pct)
-                                tp = price * (1 + self.tp_pct) if side == 'LONG' else price * (1 - self.tp_pct)
+                        if pos['side'] == 'LONG':
+                            if price >= pos['take_profit']:
+                                self.current_phase = self.PHASE_EXEC
+                                self.report_execution(symbol, f"LONG TP HIT @ ${price:,.2f}")
+                                await self._close_position(symbol, price, "TAKE_PROFIT")
+                            elif price <= pos['stop_loss']:
+                                self.current_phase = self.PHASE_EXEC
+                                self.report_execution(symbol, f"LONG SL HIT @ ${price:,.2f}")
+                                await self._close_position(symbol, price, "STOP_LOSS")
+                        else: # SHORT
+                            if price <= pos['take_profit']:
+                                self.current_phase = self.PHASE_EXEC
+                                self.report_execution(symbol, f"SHORT TP HIT @ ${price:,.2f}")
+                                await self._close_position(symbol, price, "TAKE_PROFIT")
+                            elif price >= pos['stop_loss']:
+                                self.current_phase = self.PHASE_EXEC
+                                self.report_execution(symbol, f"SHORT SL HIT @ ${price:,.2f}")
+                                await self._close_position(symbol, price, "STOP_LOSS")
                                 
-                                self.report_execution(symbol, f"EXEC {side} {size:.4f}x leverage @ ${price:,.2f}")
-                                self._open_position(symbol, side, price, size, sl, tp)
+                    else: # No active position
+                        self.current_phase = self.PHASE_RISK
+                        if signal_data['signal'] in ['LONG', 'SHORT']:
+                            if self.circuit_breaker.update_equity(self.get_total_equity(), self.name):
+                                self.current_phase = self.PHASE_EXEC
+                                side = signal_data['signal']
+                                
+                                # Futures Sizing: (Equity * Risk) / Price_Risk
+                                # Price risk is entry * sl_pct
+                                price_risk = price * self.sl_pct
+                                risk_usd = self.equity * self.risk_per_trade_pct
+                                size = risk_usd / price_risk
+                                
+                                # Check if size exceeds leveraged buying power
+                                max_size = (self.equity * self.leverage) / price
+                                size = min(size, max_size * 0.95) # 95% to leave room for fees
+                                
+                                if size > 0:
+                                    sl = price * (1 - self.sl_pct) if side == 'LONG' else price * (1 + self.sl_pct)
+                                    tp = price * (1 + self.tp_pct) if side == 'LONG' else price * (1 - self.tp_pct)
+                                    
+                                    self.report_execution(symbol, f"EXEC {side} {size:.4f}x leverage @ ${price:,.2f}")
+                                    self._open_position(symbol, side, price, size, sl, tp)
 
-                self.current_phase = self.PHASE_SYNC
-                await asyncio.sleep(0.3) # Extremely fast loop for HFT
-                
-            except Exception as e:
-                self.logger.error(f"Error in OBI Engine for {symbol}: {e}")
+                    self.current_phase = self.PHASE_SYNC
+                    await asyncio.sleep(0.3) # Extremely fast loop for HFT
+                    
+                except Exception as e:
+                    self.logger.error(f"Error in OBI Engine for {symbol}: {e}")
 
-        self.current_phase = self.PHASE_IDLE
+            # 3. Save baselines
+            await self.circuit_breaker.save_baselines(self.name)
+            
+            self.current_phase = self.PHASE_IDLE
+        finally:
+            self._is_updating = False
 
     def _open_position(self, symbol: str, side: str, price: float, amount: float, sl: float, tp: float):
+
         # In futures, margin required is (price * amount) / leverage
         margin_required = (price * amount) / self.leverage
         self.equity -= margin_required # Lock margin
@@ -165,7 +176,7 @@ class OBIScalperEngine(BaseEngine):
         }
         self.report_info(f"[{symbol}] OPEN {side} {amount:.4f} @ ${price:,.2f} | Mar: ${margin_required:,.2f}")
 
-    def _close_position(self, symbol: str, exit_price: float, reason: str):
+    async def _close_position(self, symbol: str, exit_price: float, reason: str):
         pos = self.active_positions.pop(symbol)
         
         # Calculate PnL based on side
@@ -180,7 +191,7 @@ class OBIScalperEngine(BaseEngine):
         self.report_info(f"[{symbol}] CLOSE {pos['side']} ({reason}) @ ${exit_price:,.2f} | PnL: ${pnl:,.2f}")
 
         # Record history
-        self.order_history.append({
+        record = {
             'time': time.strftime("%H:%M:%S"),
             'symbol': symbol,
             'side': pos['side'],
@@ -191,7 +202,8 @@ class OBIScalperEngine(BaseEngine):
             'max_pnl': pos.get('max_pnl', 0.0),
             'min_pnl': pos.get('min_pnl', 0.0),
             'reason': reason
-        })
+        }
+        await self.save_order_history(record)
 
     def get_total_equity(self) -> float:
         floating_pnl = 0.0
@@ -208,22 +220,42 @@ class OBIScalperEngine(BaseEngine):
 
     async def get_stats(self) -> Dict[str, Any]:
         total_equity = self.get_total_equity()
-        pnl_stats = self.circuit_breaker.get_pnl_stats(total_equity)
+        hist = await self.get_historical_stats()
+        
+        # UI baseline stats (reset timer)
+        if self.circuit_breaker:
+            pnl_stats = self.circuit_breaker.get_pnl_stats(total_equity)
+            daily_pnl = pnl_stats['daily_pnl']
+            weekly_pnl = pnl_stats['weekly_pnl']
+            monthly_pnl = pnl_stats['monthly_pnl']
+            yearly_pnl = pnl_stats['yearly_pnl']
+            next_reset_in = pnl_stats['next_reset_in']
+        else:
+            daily_pnl = weekly_pnl = monthly_pnl = yearly_pnl = 0.0
+            next_reset_in = '00:00:00'
+        
+        # Total PnL is Lifetime Realized + Current Floating
+        active_orders = await self.get_active_orders()
+        floating_pnl = sum(order['pnl'] for order in active_orders)
+        total_pnl = hist['historical_pnl'] + floating_pnl
         
         return {
             'equity': total_equity,
             'initial_equity': self.initial_equity,
-            'total_pnl': total_equity - self.initial_equity,
-            'daily_pnl': pnl_stats['daily_pnl'],
-            'weekly_pnl': pnl_stats['weekly_pnl'],
-            'monthly_pnl': pnl_stats['monthly_pnl'],
-            'yearly_pnl': pnl_stats['yearly_pnl'],
-            'next_reset_in': pnl_stats['next_reset_in'],
+            'total_pnl': total_pnl,
+            'win_rate': hist['win_rate'],
+            'trade_count': hist['trade_count'],
+            'daily_pnl': daily_pnl,
+            'weekly_pnl': weekly_pnl,
+            'monthly_pnl': monthly_pnl,
+            'yearly_pnl': yearly_pnl,
+            'next_reset_in': next_reset_in,
             'active_pos_count': len(self.active_positions),
-            'mode': 'LIVE' if self.is_live else 'TEST',
+            'mode': self.mode,
             'current_phase': self.current_phase,
             'status_message': self.status_message
         }
+
 
     async def get_active_orders(self) -> List[Dict[str, Any]]:
         results = []
@@ -257,7 +289,7 @@ class OBIScalperEngine(BaseEngine):
             price = self.active_positions[symbol]['entry_price']
             if symbol in self.cached_data:
                 price = self.cached_data[symbol]['price']
-            self._close_position(symbol, price, "MANUAL_CLOSE")
+            await self._close_position(symbol, price, "MANUAL_CLOSE")
 
     async def shutdown(self):
         self.stop()

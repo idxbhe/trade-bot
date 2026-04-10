@@ -69,7 +69,6 @@ class TradingDashboard(App):
         ("s", "toggle_bot", "Start/Stop Bot"),
         ("m", "toggle_market", "Toggle Market"),
         ("e", "cycle_engine", "Cycle Engine"),
-        ("c", "manual_close", "Close Order"),
         ("l", "toggle_logs", "Logs")
     ]
 
@@ -159,7 +158,7 @@ class TradingDashboard(App):
         row_idx = self.active_orders_table.cursor_row
         if row_idx is not None:
             try:
-                row_key = self.active_orders_table.get_row_key_at(row_idx)
+                row_key, _ = self.active_orders_table.coordinate_to_cell_key((row_idx, 0))
                 order_id = str(row_key.value)
                 if order_id:
                     self.activity_ticker.message = f"Requesting manual close for {order_id}..."
@@ -240,8 +239,9 @@ class TradingDashboard(App):
 
             # Update History Table
             # Show only last 20 entries
-            recent_history = history[-20:] if history else []
-            if self.history_table.row_count != len(recent_history):
+            current_state = (self.engine.name, self.current_market, self.engine.mode, len(history))
+            if getattr(self, '_last_history_state', None) != current_state:
+                recent_history = history[-20:] if history else []
                 self.history_table.clear()
                 for item in recent_history:
                     self.history_table.add_history_entry(
@@ -255,6 +255,7 @@ class TradingDashboard(App):
                         item.get('min_pnl', 0.0),
                         item.get('reason', 'UNKNOWN')
                     )
+                self._last_history_state = current_state
         except Exception as e:
             if hasattr(self, "activity_ticker") and self.activity_ticker:
                 self.activity_ticker.message = f"[bold red]UI Error:[/] {str(e)}"
@@ -347,7 +348,7 @@ class TradingDashboard(App):
             self.engine.stop()
             self.activity_ticker.message = "Engine Heartbeat Stopped."
 
-    @work(exclusive=True)
+    @work
     async def run_bot_worker(self) -> None:
         while self.bot_running:
             try:
@@ -365,8 +366,8 @@ class TradingDashboard(App):
                     self.engine.stop()
                     break
 
-                # 2. Update Engine
-                await self.engine.update()
+                # 2. Update Engine (Shielded to prevent interrupted execution)
+                await asyncio.shield(self.engine.update())
                 
                 # 3. Update Activity Ticker from Stats
                 if self.is_mounted and hasattr(self, "activity_ticker"):

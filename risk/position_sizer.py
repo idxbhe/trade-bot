@@ -59,3 +59,5 @@ class PositionSizer:
         actual_risk_usd = size_in_base_asset * price_risk_per_unit
         
         return size_in_base_asset, actual_risk_usd
+
+position_sizer = PositionSizer()

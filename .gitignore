@@ -51,3 +51,4 @@ headless_output.txt
 # OS
 .DS_Store
 Thumbs.db
+.bot_state.json

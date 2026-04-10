@@ -13,19 +13,38 @@ class OrderManager:
     async def execute_limit_order(self, symbol: str, side: str, amount: float, price: float, post_only: bool = True) -> Optional[Dict[str, Any]]:
         """
         Executes a Limit Order on KuCoin.
-        post_only=True ensures the order goes to the order book (Maker fee). If it would match immediately, it's cancelled.
+        Validates minimum amounts and formats precision before sending.
         """
         logger.info(f"Attempting to place {side.upper()} order for {amount:.4f} {symbol} @ ${price:,.2f} (Post-Only: {post_only})")
         
         try:
+            await self.client.load_markets()
+            
+            # Use CCXT's built-in precision formatting
+            formatted_amount = self.client.exchange.amount_to_precision(symbol, amount)
+            formatted_price = self.client.exchange.price_to_precision(symbol, price)
+            
+            # Check minimums
+            limits = await self.client.get_market_limits(symbol)
+            if limits and 'limits' in limits:
+                min_amount = limits['limits'].get('amount', {}).get('min', 0)
+                if float(formatted_amount) < min_amount:
+                    logger.warning(f"Order amount {formatted_amount} is below minimum {min_amount} for {symbol}. Order rejected.")
+                    return None
+                    
+                min_cost = limits['limits'].get('cost', {}).get('min', 0)
+                if (float(formatted_amount) * float(formatted_price)) < min_cost:
+                    logger.warning(f"Order cost is below minimum {min_cost} for {symbol}. Order rejected.")
+                    return None
+
             params = {'postOnly': post_only}
             # CCXT wrapper for KuCoin limit orders
             order = await self.client.exchange.create_order(
                 symbol=symbol,
                 type='limit',
                 side=side.lower(),
-                amount=amount,
-                price=price,
+                amount=float(formatted_amount),
+                price=float(formatted_price),
                 params=params
             )
             logger.info(f"Order Placed Successfully: ID {order.get('id')}")

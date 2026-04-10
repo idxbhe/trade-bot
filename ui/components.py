@@ -140,6 +140,8 @@ class BotStats(Static):
         
         # PnL Metrics
         total_pnl = self.stats_data.get('total_pnl', 0)
+        win_rate = self.stats_data.get('win_rate', 0)
+        trade_count = self.stats_data.get('trade_count', 0)
         daily_pnl = self.stats_data.get('daily_pnl', 0)
         weekly_pnl = self.stats_data.get('weekly_pnl', 0)
         monthly_pnl = self.stats_data.get('monthly_pnl', 0)
@@ -158,6 +160,8 @@ class BotStats(Static):
         table.add_row("Execution Mode", f"[{'yellow' if mode == 'LIVE' else 'green'}]{mode}[/]")
         table.add_row("Total Balance", f"${equity:,.2f}")
         table.add_row("Active Orders", str(active_pos_count))
+        table.add_row("Trade Count", str(trade_count))
+        table.add_row("Win Rate", f"{win_rate:.2f}%")
         table.add_row("Total PnL", fmt_pnl(total_pnl))
         table.add_row("Daily PnL", fmt_pnl(daily_pnl))
         table.add_row("Weekly PnL", fmt_pnl(weekly_pnl))
@@ -235,11 +239,18 @@ class ActiveOrdersTable(DataTable):
 
     async def on_key(self, event) -> None:
         if event.key == "c":
-            if self.cursor_row is not None:
-                row_key = self.get_row_key_at(self.cursor_row)
-                order_id = str(row_key.value)
-                # We need to tell the app to close it
-                self.post_message(self.ManualCloseRequest(order_id))
+            # Direct access to coordinate is more reliable than row index for precision
+            coord = self.cursor_coordinate
+            if coord:
+                try:
+                    row_key, _ = self.coordinate_to_cell_key(coord)
+                    order_id = str(row_key.value)
+                    # Stop the key event so it doesn't trigger other things
+                    event.stop()
+                    # Tell the dashboard which SPECIFIC order ID to close
+                    self.post_message(self.ManualCloseRequest(order_id))
+                except Exception:
+                    pass
 
     class ManualCloseRequest(Message):
         def __init__(self, order_id: str):

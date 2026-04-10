@@ -12,7 +12,7 @@ class Config:
     
     # --- Environment & Database (Fallback to defaults if not in .env) ---
     KUCOIN_ENV = os.getenv("KUCOIN_ENV", "sandbox")
-    DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/trade_bot_db")
+    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///trade_bot.db")
     
     # --- Risk Management Params (Fallback to defaults) ---
     # Default Risk: 1% per trade
