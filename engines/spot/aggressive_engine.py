@@ -42,7 +42,11 @@ class AggressiveScalperEngine(BaseEngine):
         self.risk_manager = PositionSizer(max_risk_pct=0.005, atr_multiplier=1.2)
         # Tight Circuit Breaker: 2% daily drawdown
         self.circuit_breaker = CircuitBreaker(max_daily_drawdown_pct=0.02)
-        await self.circuit_breaker.load_baselines(self.name)
+        stored_equity = await self.circuit_breaker.load_baselines(self.name)
+        
+        if stored_equity is not None:
+            self.equity = stored_equity
+            self.logger.info(f"[{self.name}] Continued with persisted equity: ${self.equity:,.2f}")
         
         self.logger.info(f"Engine {self.name} initialized. Mode: {'LIVE' if self.is_live else 'TEST'}. Loaded {len(self.active_positions)} active positions.")
 
@@ -147,7 +151,7 @@ class AggressiveScalperEngine(BaseEngine):
                     self.logger.error(f"Error in Aggressive Engine for {symbol}: {e}")
 
             # Save baselines
-            await self.circuit_breaker.save_baselines(self.name)
+            await self.circuit_breaker.save_baselines(self.name, self.equity)
             self.current_phase = self.PHASE_IDLE
         finally:
             self._is_updating = False

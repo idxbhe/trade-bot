@@ -43,7 +43,11 @@ class HybridEngineV1(BaseEngine):
         self.risk_manager = PositionSizer(max_risk_pct=0.015, atr_multiplier=2.5)
         # Standard Circuit Breaker: 5% daily drawdown
         self.circuit_breaker = CircuitBreaker(max_daily_drawdown_pct=0.05)
-        await self.circuit_breaker.load_baselines(self.name)
+        stored_equity = await self.circuit_breaker.load_baselines(self.name)
+        
+        if stored_equity is not None:
+            self.equity = stored_equity
+            self.logger.info(f"[{self.name}] Continued with persisted equity: ${self.equity:,.2f}")
         
         self.logger.info(f"Engine {self.name} initialized. Mode: {'LIVE' if self.is_live else 'TEST'}. Loaded {len(self.active_positions)} active positions.")
 
@@ -146,7 +150,7 @@ class HybridEngineV1(BaseEngine):
                     self.logger.error(f"Error updating {symbol}: {e}")
 
             # 3. Always save baselines if updated/reset during cycle
-            await self.circuit_breaker.save_baselines(self.name)
+            await self.circuit_breaker.save_baselines(self.name, self.equity)
 
             self.current_phase = self.PHASE_IDLE
             self.report_info("Cycle complete. Resting...")

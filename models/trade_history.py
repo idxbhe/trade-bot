@@ -40,6 +40,7 @@ class EquityBaseline(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     engine_name = Column(String, unique=True, index=True)
+    current_equity = Column(Float) # Persist the wallet balance
     daily = Column(Float)
     weekly = Column(Float)
     monthly = Column(Float)

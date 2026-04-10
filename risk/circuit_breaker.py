@@ -115,8 +115,8 @@ class CircuitBreaker:
             
         return True
 
-    async def load_baselines(self, engine_name: str):
-        """Load equity baselines from database."""
+    async def load_baselines(self, engine_name: str) -> Optional[float]:
+        """Load equity baselines and current equity from database."""
         try:
             from core.database import async_session
             from models.trade_history import EquityBaseline
@@ -137,11 +137,14 @@ class CircuitBreaker:
                     self.last_reset_monthly = record.last_reset_monthly
                     self.last_reset_yearly = record.last_reset_yearly
                     logger.info(f"[{engine_name}] Equity baselines loaded from database.")
+                    return record.current_equity
+                return None
         except Exception as e:
             logger.error(f"Failed to load baselines for {engine_name}: {e}")
+            return None
 
-    async def save_baselines(self, engine_name: str):
-        """Save current equity baselines to database."""
+    async def save_baselines(self, engine_name: str, current_equity: float):
+        """Save current equity and baselines to database."""
         try:
             from core.database import async_session
             from models.trade_history import EquityBaseline
@@ -153,6 +156,7 @@ class CircuitBreaker:
                 record = result.scalars().first()
                 
                 if record:
+                    record.current_equity = current_equity
                     record.daily = self.baseline_daily
                     record.weekly = self.baseline_weekly
                     record.monthly = self.baseline_monthly
@@ -164,6 +168,7 @@ class CircuitBreaker:
                 else:
                     new_record = EquityBaseline(
                         engine_name=engine_name,
+                        current_equity=current_equity,
                         daily=self.baseline_daily,
                         weekly=self.baseline_weekly,
                         monthly=self.baseline_monthly,
@@ -181,11 +186,11 @@ class CircuitBreaker:
 
     def get_pnl_stats(self, current_equity: float) -> Dict[str, Any]:
         """Returns all timeframe PnL stats and reset timers."""
-        # Ensure baselines exist (first run)
-        if self.baseline_daily is None: self.baseline_daily = current_equity
-        if self.baseline_weekly is None: self.baseline_weekly = current_equity
-        if self.baseline_monthly is None: self.baseline_monthly = current_equity
-        if self.baseline_yearly is None: self.baseline_yearly = current_equity
+        # ENSURE: No side-effects here. Use local variables if baselines are not loaded yet.
+        bd = self.baseline_daily if self.baseline_daily is not None else current_equity
+        bw = self.baseline_weekly if self.baseline_weekly is not None else current_equity
+        bm = self.baseline_monthly if self.baseline_monthly is not None else current_equity
+        by = self.baseline_yearly if self.baseline_yearly is not None else current_equity
         
         # Calculate Next Daily Reset for the timer
         next_reset = self._get_reset_boundary('daily') + timedelta(days=1)
@@ -194,10 +199,10 @@ class CircuitBreaker:
         minutes, seconds = divmod(remainder, 60)
         
         return {
-            'daily_pnl': current_equity - self.baseline_daily,
-            'weekly_pnl': current_equity - self.baseline_weekly,
-            'monthly_pnl': current_equity - self.baseline_monthly,
-            'yearly_pnl': current_equity - self.baseline_yearly,
+            'daily_pnl': current_equity - bd,
+            'weekly_pnl': current_equity - bw,
+            'monthly_pnl': current_equity - bm,
+            'yearly_pnl': current_equity - by,
             'next_reset_in': f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         }
 
