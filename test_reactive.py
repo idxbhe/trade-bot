@@ -2,7 +2,7 @@ from textual.app import App
 from textual.reactive import reactive
 import pandas as pd
 
-class TestApp(App):
+class ReactiveApp(App):
     data = reactive(None, always_update=True)
     
     def on_mount(self):
@@ -14,4 +14,4 @@ class TestApp(App):
         self.exit()
 
 if __name__ == "__main__":
-    TestApp().run()
+    ReactiveApp().run()

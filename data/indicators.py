@@ -34,7 +34,7 @@ class Indicators:
         low_close = np.abs(df['low'] - df['close'].shift())
         
         ranges = pd.concat([high_low, high_close, low_close], axis=1)
-        true_range = np.max(ranges, axis=1)
+        true_range = ranges.max(axis=1)
         
         atr = true_range.ewm(alpha=1/period, min_periods=period).mean()
         return atr

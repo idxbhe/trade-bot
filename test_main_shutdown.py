@@ -3,12 +3,12 @@ import sys
 from ui.dashboard import TradingDashboard
 from exchange.kucoin import kucoin_client
 
-async def test_run():
+async def run_test_shutdown():
     app = TradingDashboard()
     
     async def stop_after_delay():
         await asyncio.sleep(2)
-        app.action_toggle_bot() # Start
+        await app.action_toggle_bot() # Start
         await asyncio.sleep(4)
         app.exit()
         
@@ -17,4 +17,4 @@ async def test_run():
     await kucoin_client.close()
 
 if __name__ == "__main__":
-    asyncio.run(test_run())
+    asyncio.run(run_test_shutdown())

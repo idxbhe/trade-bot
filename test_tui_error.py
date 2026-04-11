@@ -3,12 +3,12 @@ from ui.dashboard import TradingDashboard
 from core.logger import log_queue
 import threading
 
-async def run_test():
+async def run_test_tui():
     app = TradingDashboard()
     
     async def simulate_start():
         await asyncio.sleep(2)
-        app.action_toggle_bot() # Start bot
+        await app.action_toggle_bot() # Start bot
         await asyncio.sleep(5)
         app.exit()
     
@@ -19,4 +19,4 @@ async def run_test():
     while not log_queue.empty():
         print(log_queue.get_nowait())
 
-asyncio.run(run_test())
+asyncio.run(run_test_tui())

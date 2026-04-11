@@ -2,28 +2,27 @@ import asyncio
 import pandas as pd
 from core.logger import logger
 from risk.position_sizer import position_sizer
-from risk.circuit_breaker import circuit_breaker
+from risk.circuit_breaker import CircuitBreaker
 from execution.order_manager import order_manager
 
-async def test_risk_and_execution():
+async def run_test_risk_and_execution():
     logger.info("--- Testing Risk Management (Phase 4) ---")
     
     # 1. Test Circuit Breaker
     logger.info("\n[1] Testing Circuit Breaker:")
-    starting_equity = 10000.0
-    circuit_breaker.update_equity(starting_equity)
+    circuit_breaker = CircuitBreaker(max_daily_drawdown_pct=0.05)
+    baseline = 10000.0
     
     # Simulate a small loss
-    is_safe = circuit_breaker.update_equity(9800.0) # 2% loss
-    logger.info(f"Equity drops to $9800 (2% loss) -> Is Safe to trade? {is_safe}")
+    is_tripped = circuit_breaker.is_tripped(9800.0, baseline) # 2% loss
+    logger.info(f"Equity drops to $9800 (2% loss) -> Is Safe to trade? {not is_tripped}")
     
     # Simulate a catastrophic loss (> 5%)
-    is_safe = circuit_breaker.update_equity(9400.0) # 6% loss
-    logger.info(f"Equity drops to $9400 (6% loss) -> Is Safe to trade? {is_safe}")
+    is_tripped = circuit_breaker.is_tripped(9400.0, baseline) # 6% loss
+    logger.info(f"Equity drops to $9400 (6% loss) -> Is Safe to trade? {not is_tripped}")
     
     # Reset for next tests
-    circuit_breaker.is_tripped = False
-    circuit_breaker.initial_daily_equity = 10000.0
+    circuit_breaker.reset()
     
     # 2. Test Position Sizing & ATR Stop Loss
     logger.info("\n[2] Testing Position Sizer (Mean Reversion Scenario):")
@@ -52,4 +51,4 @@ async def test_risk_and_execution():
     await kucoin_client.close()
 
 if __name__ == '__main__':
-    asyncio.run(test_risk_and_execution())
+    asyncio.run(run_test_risk_and_execution())
