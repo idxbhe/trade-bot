@@ -146,15 +146,12 @@ class TradingDashboard(App):
     async def on_active_orders_table_manual_close_request(self, message: ActiveOrdersTable.ManualCloseRequest) -> None:
         order_id = message.order_id
         symbol = order_id.rsplit('_', 1)[0]
-        self.activity_ticker.message = f"Requesting manual close for {order_id}..."
+        self.activity_ticker.message = f"Requesting manual close for {symbol}..."
         
-        ctx = kernel.contexts.get(self.engine_name)
-        if ctx:
-            pos = kernel.state_manager.get_position(self.engine_name, symbol)
-            if pos:
-                price = kernel.data_stream.latest_prices.get(symbol, pos['entry_price'])
-                await kernel.close_position(self.engine_name, symbol, price, "MANUAL_CLOSE")
+        # Use the robust kernel implementation
+        await kernel.manual_close_position(self.engine_name, symbol)
         
+        # Sync UI immediately to reflect changes
         await self.update_ui_sync()
 
     async def update_ui_sync(self):

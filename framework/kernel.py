@@ -198,6 +198,37 @@ class Kernel:
         
         return True
 
+    async def manual_close_position(self, engine_name: str, symbol: str) -> bool:
+        """Robustly close a position manually, fetching the latest price first."""
+        ctx = self.contexts.get(engine_name)
+        if not ctx:
+            logger.error(f"Manual Close failed: Engine '{engine_name}' not loaded.")
+            return False
+
+        pos = self.state_manager.get_position(engine_name, symbol)
+        if not pos:
+            logger.warning(f"Manual Close failed: No active position found for {symbol} in '{engine_name}'.")
+            return False
+
+        # Get the most recent price from DataStream for a precise exit
+        price = self.data_stream.latest_prices.get(symbol)
+        if not price:
+            # Fallback to entry price if no tick data yet (rare)
+            price = pos['entry_price']
+            logger.warning(f"Manual Close: No tick data for {symbol}, using entry price as fallback.")
+
+        self.report_status(engine_name, symbol, "EXEC", "Manual Close requested...")
+        
+        success = await self.close_position(engine_name, symbol, price, "MANUAL_CLOSE")
+        
+        if success:
+            logger.info(f"Manual Close successful for {symbol} @ ${price:,.2f}")
+        else:
+            logger.error(f"Manual Close FAILED for {symbol} via Exchange API.")
+            self.report_status(engine_name, symbol, "ERROR", "Manual Close Failed!")
+            
+        return success
+
     async def close_position(self, engine_name: str, symbol: str, exit_price: float, reason: str) -> bool:
         ctx = self.contexts.get(engine_name)
         if not ctx: return False
