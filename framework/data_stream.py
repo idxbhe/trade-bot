@@ -31,6 +31,13 @@ class DataStream:
         if engine_name not in self.subscriptions:
             self.subscriptions[engine_name] = {'tickers': set(), 'candles': {}, 'is_futures': is_futures}
 
+    def unregister_engine(self, engine_name: str):
+        if engine_name in self._callbacks:
+            del self._callbacks[engine_name]
+        if engine_name in self.subscriptions:
+            del self.subscriptions[engine_name]
+        logger.info(f"DataStream: Engine '{engine_name}' unregistered.")
+
     def subscribe_ticker(self, engine_name: str, symbol: str):
         if engine_name in self.subscriptions:
             self.subscriptions[engine_name]['tickers'].add(symbol)

@@ -35,35 +35,80 @@ class Kernel:
         await self.state_manager.stop_sync_loop()
         logger.info("Framework Kernel stopped.")
 
-    async def register_engine(self, engine_instance, mode: str, market: str, initial_equity: float):
-        """Register and start an engine, injecting the TradingContext."""
+    async def load_engine(self, engine_instance, mode: str, market: str, initial_equity: float):
+        """Phase 1: Load state from DB and init memory. No data streaming yet."""
         name = engine_instance.name
         self.engines[name] = engine_instance
         
         # 1. Init state memory
         self.state_manager.initialize_engine_state(name, initial_equity, mode, market)
+        self.state_manager.state[name]['ui']['phase'] = 'STANDBY'
+        self.state_manager.state[name]['ui']['latest_activity'] = 'Engine Loaded (Standby)'
         
         # 2. Load from DB
         await self.state_manager.load_state_from_db(name)
+        
+        # Subscribe to tickers for existing positions so UI gets live prices while in standby
+        # We need to make sure the DataStream has registered the engine first
+        self.data_stream.register_engine(name, lambda s, d, e: None, market.lower() == 'futures')
+        for symbol in self.state_manager.state[name]['positions'].keys():
+            self.data_stream.subscribe_ticker(name, symbol)
         
         # 3. Create Context DI
         ctx = TradingContext(self, name, mode, market)
         self.contexts[name] = ctx
         
-        # 4. Bind data stream to engine's events
+        logger.info(f"Engine '{name}' state loaded. Standing by.")
+
+    async def start_engine(self, engine_name: str):
+        """Phase 2: Bind data streams and execute on_start."""
+        if engine_name not in self.engines or engine_name not in self.contexts:
+            logger.error(f"Cannot start engine '{engine_name}', it is not loaded.")
+            return
+
+        engine_instance = self.engines[engine_name]
+        ctx = self.contexts[engine_name]
+        
+        self.state_manager.state[engine_name]['ui']['phase'] = 'IDLE'
+        self.state_manager.state[engine_name]['ui']['latest_activity'] = 'Engine starting...'
+        
+        # Bind data stream to engine's events
         async def event_router(symbol: str, data: dict, event_type: str):
             if event_type == 'tick' and hasattr(engine_instance, 'on_tick'):
                 await engine_instance.on_tick(symbol, data)
             elif event_type == 'candle' and hasattr(engine_instance, 'on_candle_closed'):
                 await engine_instance.on_candle_closed(symbol, data)
                 
-        self.data_stream.register_engine(name, event_router, market.lower() == 'futures')
+        is_futures = ctx.market.lower() == 'futures'
+        self.data_stream.register_engine(engine_name, event_router, is_futures)
         
-        # 5. Start Engine
+        # Start Engine
         if hasattr(engine_instance, 'on_start'):
             await engine_instance.on_start(ctx)
             
-        logger.info(f"Engine '{name}' registered and hooked into Kernel. Awaiting data...")
+        logger.info(f"Engine '{engine_name}' started and hooked into Kernel. Awaiting data...")
+
+    async def stop_engine(self, engine_name: str):
+        """Stop the engine and unbind its data stream."""
+        if engine_name in self.engines:
+            engine_instance = self.engines[engine_name]
+            if hasattr(engine_instance, 'shutdown'):
+                await engine_instance.shutdown()
+            
+            # Unregister from DataStream to stop receiving events
+            self.data_stream.unregister_engine(engine_name)
+            
+            self.state_manager.state[engine_name]['ui']['phase'] = 'STANDBY'
+            self.state_manager.state[engine_name]['ui']['latest_activity'] = 'Engine stopped.'
+            logger.info(f"Engine '{engine_name}' stopped.")
+
+    def unload_engine(self, engine_name: str):
+        """Remove engine from memory (used when switching engines)."""
+        if engine_name in self.engines:
+            del self.engines[engine_name]
+        if engine_name in self.contexts:
+            del self.contexts[engine_name]
+        logger.info(f"Engine '{engine_name}' unloaded.")
 
     def update_engine_mode(self, engine_name: str, mode: str):
         """Change the execution mode (TEST/LIVE) for an engine at runtime."""

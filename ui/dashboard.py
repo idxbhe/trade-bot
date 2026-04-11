@@ -157,7 +157,7 @@ class TradingDashboard(App):
         await self.update_ui_sync()
 
     async def update_ui_sync(self):
-        if not self.is_mounted or not self.bot_running:
+        if not self.is_mounted:
             return
 
         try:
@@ -213,12 +213,21 @@ class TradingDashboard(App):
             if hasattr(self, "activity_ticker") and self.activity_ticker:
                 self.activity_ticker.message = f"[bold red]UI Error:[/] {str(e)}"
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self.title = "🤖 KUCOIN TRADE BOT (KERNEL MODE)"
         self.set_interval(0.5, self.flush_logs)
         self.set_interval(1.0, self.update_ui_sync)
-        self.activity_ticker.message = "Press 'S' to Start Kernel."
+        self.activity_ticker.message = "Loading initial state..."
         self.active_orders_table.focus()
+        
+        # Start kernel background services once
+        await kernel.start()
+        
+        # Load the default engine into memory
+        engine_instance = self.available_engines[self.engine_idx]()
+        await kernel.load_engine(engine_instance, self.execution_mode, self.current_market, config.TEST_INITIAL_BALANCE)
+        self.engine_initialized = True
+        self.activity_ticker.message = "Ready. Press 'S' to Start Engine."
 
     def flush_logs(self) -> None:
         while not log_queue.empty():
@@ -269,30 +278,31 @@ class TradingDashboard(App):
         )
 
     async def perform_engine_swap(self, new_idx: int):
+        if self.engine_initialized:
+            kernel.unload_engine(self.engine_name)
+            
         self.bot_running = False
         self.engine_idx = new_idx
         self.engine_name = self.available_engines[self.engine_idx]().name
-        self.engine_initialized = False
-        self.activity_ticker.message = f"Swapped to {self.engine_name}."
+        self.activity_ticker.message = f"Loading {self.engine_name}..."
+        
+        engine_instance = self.available_engines[self.engine_idx]()
+        await kernel.load_engine(engine_instance, self.execution_mode, self.current_market, config.TEST_INITIAL_BALANCE)
+        self.engine_initialized = True
+        
+        self.activity_ticker.message = f"Swapped to {self.engine_name}. Ready to start."
         self.save_bot_state()
 
     async def action_toggle_bot(self) -> None:
         if not self.bot_running:
             self.bot_running = True
-            
-            if not self.engine_initialized:
-                await kernel.start()
-                engine_instance = self.available_engines[self.engine_idx]()
-                await kernel.register_engine(engine_instance, self.execution_mode, self.current_market, config.TEST_INITIAL_BALANCE)
-                self.engine_initialized = True
-                
-            self.activity_ticker.message = f"Kernel Running ({self.execution_mode})..."
+            await kernel.start_engine(self.engine_name)
+            self.activity_ticker.message = f"Engine Running ({self.execution_mode})..."
             self.run_bot_worker()
         else:
             self.bot_running = False
-            await kernel.stop()
-            self.engine_initialized = False
-            self.activity_ticker.message = "Kernel Stopped."
+            await kernel.stop_engine(self.engine_name)
+            self.activity_ticker.message = "Engine Stopped (Standby)."
 
     async def action_toggle_mode(self) -> None:
         if self.bot_running:
@@ -315,6 +325,7 @@ class TradingDashboard(App):
 
     async def action_quit_app(self) -> None:
         self.bot_running = False
+        await kernel.stop_engine(self.engine_name)
         await kernel.stop()
         await kucoin_client.close()
         await kucoin_futures_client.close()
