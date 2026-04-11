@@ -19,6 +19,10 @@ class DataStream:
         # Active asyncio tasks for streaming
         self._tasks: set = set()
         
+        # Track active workers to prevent duplicates
+        self._active_ticker_workers: Set[str] = set() # "symbol_futures"
+        self._active_candle_workers: Set[str] = set() # "symbol_timeframe_futures"
+        
         # Track last candle timestamps: symbol_timeframe -> last_timestamp
         self._last_candle_ts: Dict[str, int] = {}
 
@@ -30,51 +34,49 @@ class DataStream:
     def subscribe_ticker(self, engine_name: str, symbol: str):
         if engine_name in self.subscriptions:
             self.subscriptions[engine_name]['tickers'].add(symbol)
+            is_futures = self.subscriptions[engine_name]['is_futures']
             logger.info(f"DataStream: Engine '{engine_name}' subscribed to ticker {symbol}")
+            
+            if self._running:
+                self._ensure_ticker_worker(symbol, is_futures)
 
     def subscribe_candles(self, engine_name: str, symbol: str, timeframe: str):
         if engine_name in self.subscriptions:
             self.subscriptions[engine_name]['candles'][symbol] = timeframe
+            is_futures = self.subscriptions[engine_name]['is_futures']
             logger.info(f"DataStream: Engine '{engine_name}' subscribed to candles {symbol} ({timeframe})")
+            
+            if self._running:
+                self._ensure_candle_worker(symbol, timeframe, is_futures)
+
+    def _ensure_ticker_worker(self, symbol: str, is_futures: bool):
+        worker_key = f"{symbol}_{is_futures}"
+        if worker_key not in self._active_ticker_workers:
+            logger.info(f"DataStream: Spawning dynamic ticker worker for {symbol} (Futures: {is_futures})")
+            task = asyncio.create_task(self._watch_ticker_loop(symbol, is_futures))
+            self._tasks.add(task)
+            self._active_ticker_workers.add(worker_key)
+
+    def _ensure_candle_worker(self, symbol: str, timeframe: str, is_futures: bool):
+        worker_key = f"{symbol}_{timeframe}_{is_futures}"
+        if worker_key not in self._active_candle_workers:
+            logger.info(f"DataStream: Spawning dynamic candle worker for {symbol} {timeframe} (Futures: {is_futures})")
+            task = asyncio.create_task(self._watch_ohlcv_loop(symbol, timeframe, is_futures))
+            self._tasks.add(task)
+            self._active_candle_workers.add(worker_key)
 
     async def start(self):
         if self._running:
             return
         self._running = True
         
-        # Collect unique subscriptions
-        spot_tickers = set()
-        futures_tickers = set()
-        spot_candles = {} # symbol -> set(timeframes)
-        futures_candles = {}
-        
-        for eng_name, subs in self.subscriptions.items():
+        # Collect unique subscriptions and start workers
+        for subs in self.subscriptions.values():
             is_futures = subs['is_futures']
-            tickers = spot_tickers if not is_futures else futures_tickers
-            candles = spot_candles if not is_futures else futures_candles
-            
-            tickers.update(subs['tickers'])
+            for sym in subs['tickers']:
+                self._ensure_ticker_worker(sym, is_futures)
             for sym, tf in subs['candles'].items():
-                if sym not in candles: candles[sym] = set()
-                candles[sym].add(tf)
-
-        # Start Ticker Streams
-        for sym in spot_tickers:
-            task = asyncio.create_task(self._watch_ticker_loop(sym, False))
-            self._tasks.add(task)
-        for sym in futures_tickers:
-            task = asyncio.create_task(self._watch_ticker_loop(sym, True))
-            self._tasks.add(task)
-            
-        # Start Candle Streams
-        for sym, tfs in spot_candles.items():
-            for tf in tfs:
-                task = asyncio.create_task(self._watch_ohlcv_loop(sym, tf, False))
-                self._tasks.add(task)
-        for sym, tfs in futures_candles.items():
-            for tf in tfs:
-                task = asyncio.create_task(self._watch_ohlcv_loop(sym, tf, True))
-                self._tasks.add(task)
+                self._ensure_candle_worker(sym, tf, is_futures)
                 
         logger.info("DataStream WebSocket workers started.")
 
@@ -83,6 +85,8 @@ class DataStream:
         for task in self._tasks:
             task.cancel()
         self._tasks.clear()
+        self._active_ticker_workers.clear()
+        self._active_candle_workers.clear()
         logger.info("DataStream WebSocket workers stopped.")
 
     async def _watch_ticker_loop(self, symbol: str, is_futures: bool):

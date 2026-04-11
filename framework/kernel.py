@@ -63,7 +63,7 @@ class Kernel:
         if hasattr(engine_instance, 'on_start'):
             await engine_instance.on_start(ctx)
             
-        logger.info(f"Engine '{name}' registered and hooked into Kernel.")
+        logger.info(f"Engine '{name}' registered and hooked into Kernel. Awaiting data...")
 
     def update_engine_mode(self, engine_name: str, mode: str):
         """Change the execution mode (TEST/LIVE) for an engine at runtime."""
