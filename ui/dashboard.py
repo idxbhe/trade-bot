@@ -80,6 +80,7 @@ class TradingDashboard(App):
     def __init__(self):
         super().__init__()
         self.bot_running = False
+        self.is_processing = False # Lock flag for async operations
         self.log_history = [] 
         self.spot_engines = [HybridEngineV1, ScannerOnlyEngine, AggressiveScalperEngine]
         self.futures_engines = [OBIScalperEngine, PlaceholderFuturesEngine]
@@ -278,31 +279,43 @@ class TradingDashboard(App):
         )
 
     async def perform_engine_swap(self, new_idx: int):
-        if self.engine_initialized:
-            kernel.unload_engine(self.engine_name)
+        if self.is_processing: return
+        self.is_processing = True
+        
+        try:
+            if self.engine_initialized:
+                kernel.unload_engine(self.engine_name)
+                
+            self.bot_running = False
+            self.engine_idx = new_idx
+            self.engine_name = self.available_engines[self.engine_idx]().name
+            self.activity_ticker.message = f"Loading {self.engine_name}..."
             
-        self.bot_running = False
-        self.engine_idx = new_idx
-        self.engine_name = self.available_engines[self.engine_idx]().name
-        self.activity_ticker.message = f"Loading {self.engine_name}..."
-        
-        engine_instance = self.available_engines[self.engine_idx]()
-        await kernel.load_engine(engine_instance, self.execution_mode, self.current_market, config.TEST_INITIAL_BALANCE)
-        self.engine_initialized = True
-        
-        self.activity_ticker.message = f"Swapped to {self.engine_name}. Ready to start."
-        self.save_bot_state()
+            engine_instance = self.available_engines[self.engine_idx]()
+            await kernel.load_engine(engine_instance, self.execution_mode, self.current_market, config.TEST_INITIAL_BALANCE)
+            self.engine_initialized = True
+            
+            self.activity_ticker.message = f"Swapped to {self.engine_name}. Ready to start."
+            self.save_bot_state()
+        finally:
+            self.is_processing = False
 
     async def action_toggle_bot(self) -> None:
-        if not self.bot_running:
-            self.bot_running = True
-            await kernel.start_engine(self.engine_name)
-            self.activity_ticker.message = f"Engine Running ({self.execution_mode})..."
-            self.run_bot_worker()
-        else:
-            self.bot_running = False
-            await kernel.stop_engine(self.engine_name)
-            self.activity_ticker.message = "Engine Stopped (Standby)."
+        if self.is_processing: return
+        self.is_processing = True
+        
+        try:
+            if not self.bot_running:
+                self.bot_running = True
+                await kernel.start_engine(self.engine_name)
+                self.activity_ticker.message = f"Engine Running ({self.execution_mode})..."
+                self.run_bot_worker()
+            else:
+                self.bot_running = False
+                await kernel.stop_engine(self.engine_name)
+                self.activity_ticker.message = "Engine Stopped (Standby)."
+        finally:
+            self.is_processing = False
 
     async def action_toggle_mode(self) -> None:
         if self.bot_running:

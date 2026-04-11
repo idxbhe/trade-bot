@@ -189,6 +189,12 @@ class StateManager:
             del self.state[engine_name]['positions'][symbol]
             self.db_queue.put_nowait(('remove_position', engine_name, symbol))
 
+    def clear_engine_state(self, engine_name: str):
+        """Completely remove an engine's state from memory."""
+        if engine_name in self.state:
+            del self.state[engine_name]
+            logger.info(f"StateManager: State for '{engine_name}' cleared from memory.")
+
     def record_history(self, engine_name: str, record: dict):
         if engine_name in self.state:
             s = self.state[engine_name]

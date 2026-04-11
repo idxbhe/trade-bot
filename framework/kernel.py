@@ -89,26 +89,41 @@ class Kernel:
         logger.info(f"Engine '{engine_name}' started and hooked into Kernel. Awaiting data...")
 
     async def stop_engine(self, engine_name: str):
-        """Stop the engine and unbind its data stream."""
+        """Stop the engine logic but keep UI prices active for open positions."""
         if engine_name in self.engines:
             engine_instance = self.engines[engine_name]
             if hasattr(engine_instance, 'shutdown'):
                 await engine_instance.shutdown()
             
-            # Unregister from DataStream to stop receiving events
-            self.data_stream.unregister_engine(engine_name)
+            # PAUSE: We replace the event router with a no-op so strategy doesn't execute
+            # But we DON'T unregister from DataStream yet, to keep floating PnL updating
+            async def no_op_router(symbol: str, data: dict, event_type: str):
+                pass
+                
+            ctx = self.contexts.get(engine_name)
+            if ctx:
+                is_futures = ctx.market.lower() == 'futures'
+                self.data_stream.register_engine(engine_name, no_op_router, is_futures)
             
             self.state_manager.state[engine_name]['ui']['phase'] = 'STANDBY'
-            self.state_manager.state[engine_name]['ui']['latest_activity'] = 'Engine stopped.'
-            logger.info(f"Engine '{engine_name}' stopped.")
+            self.state_manager.state[engine_name]['ui']['latest_activity'] = 'Engine paused (Standby).'
+            logger.info(f"Engine '{engine_name}' logic stopped. Prices still tracking.")
 
     def unload_engine(self, engine_name: str):
-        """Remove engine from memory (used when switching engines)."""
+        """Clean up all resources (DataStream workers and RAM state)."""
+        # 1. Unregister from DataStream (cancels WebSocket tasks)
+        self.data_stream.unregister_engine(engine_name)
+        
+        # 2. Clear from StateManager (frees RAM)
+        self.state_manager.clear_engine_state(engine_name)
+        
+        # 3. Remove local references
         if engine_name in self.engines:
             del self.engines[engine_name]
         if engine_name in self.contexts:
             del self.contexts[engine_name]
-        logger.info(f"Engine '{engine_name}' unloaded.")
+            
+        logger.info(f"Engine '{engine_name}' fully unloaded from memory and network.")
 
     def update_engine_mode(self, engine_name: str, mode: str):
         """Change the execution mode (TEST/LIVE) for an engine at runtime."""
