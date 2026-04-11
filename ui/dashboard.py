@@ -171,6 +171,21 @@ class TradingDashboard(App):
             activity = stats.get('latest_activity', "Engine processing...")
             self.activity_ticker.message = str(activity)
             
+            # Update History Table from Kernel Queue
+            new_history = kernel.get_ui_history(self.engine_name)
+            for h in new_history:
+                self.history_table.add_history_entry(
+                    time_str=h.get('time', '???'),
+                    symbol=h.get('symbol', '???'),
+                    side=h.get('side', '???'),
+                    amount=h.get('amount', 0),
+                    exit_price=h.get('exit', 0),
+                    pnl=h.get('pnl', 0),
+                    max_pnl=h.get('max_pnl', 0),
+                    min_pnl=h.get('min_pnl', 0),
+                    reason=h.get('reason', '???')
+                )
+            
             # Transfer verbose queue to log history (only if new)
             # The StateManager appends to ui['verbose_queue']. We need to drain it.
             if self.engine_name in kernel.state_manager.state:
@@ -287,6 +302,10 @@ class TradingDashboard(App):
             self.engine_idx = new_idx
             self.engine_name = self.available_engines[self.engine_idx]().name
             self.activity_ticker.message = f"Loading {self.engine_name}..."
+            
+            # Clear UI Tables to prevent duplicates when switching
+            self.history_table.clear()
+            self.active_orders_table.clear()
             
             engine_instance = self.available_engines[self.engine_idx]()
             await kernel.load_engine(engine_instance, self.execution_mode, self.current_market, config.TEST_INITIAL_BALANCE)

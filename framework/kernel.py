@@ -316,5 +316,9 @@ class Kernel:
         """Called safely by the TUI loop to get active orders."""
         return self.state_manager.get_ui_orders(engine_name, self.data_stream.latest_prices)
 
+    def get_ui_history(self, engine_name: str) -> list:
+        """Called safely by the TUI loop to get new trade history entries."""
+        return self.state_manager.get_ui_history(engine_name)
+
 # Global singleton
 kernel = Kernel()

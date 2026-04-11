@@ -61,6 +61,7 @@ class StateManager:
                     'phase': 'IDLE',
                     'message': 'Engine initialized',
                     'verbose_queue': [],
+                    'history_queue': [],
                     'latest_activity': 'Engine ready'
                 }
             }
@@ -142,6 +143,25 @@ class StateManager:
                     'trade_count': trade_count,
                     'win_rate': win_rate
                 })
+
+                # Fetch recent trade history for UI
+                hist_stmt = (select(TradeHistory)
+                             .where(TradeHistory.engine_name == engine_name)
+                             .order_by(TradeHistory.id.desc())
+                             .limit(50))
+                hist_res = await session.execute(hist_stmt)
+                recent_trades = hist_res.scalars().all()
+                
+                # We want latest at the top, but history table might need them in specific order
+                # The UI appends to table, so we pass them in reverse (oldest to newest) 
+                # to populate correctly.
+                for t in reversed(recent_trades):
+                    self.state[engine_name]['ui']['history_queue'].append({
+                        'symbol': t.symbol, 'side': t.side, 'amount': t.amount,
+                        'entry': t.entry_price, 'exit': t.exit_price, 'pnl': t.pnl,
+                        'max_pnl': t.max_pnl, 'min_pnl': t.min_pnl, 'reason': t.reason,
+                        'time': t.time
+                    })
         except Exception as e:
             logger.error(f"Failed to load DB state for {engine_name}: {e}")
 
@@ -200,7 +220,19 @@ class StateManager:
             s = self.state[engine_name]
             record['market'] = s['market']
             record['mode'] = s['mode']
+            
+            # Add to UI queue for real-time display
+            s['ui']['history_queue'].append(record)
+            
             self.db_queue.put_nowait(('save_history', engine_name, record))
+
+    def get_ui_history(self, engine_name: str) -> list:
+        """Fetch and clear the history queue for the UI."""
+        if engine_name in self.state:
+            queue = self.state[engine_name]['ui']['history_queue']
+            self.state[engine_name]['ui']['history_queue'] = []
+            return queue
+        return []
 
     def update_ui_status(self, engine_name: str, symbol: str, phase: str, message: str):
         if engine_name in self.state:

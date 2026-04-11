@@ -25,8 +25,6 @@ import models.trade_history
 async def init_db():
     """Initialize database tables"""
     async with engine.begin() as conn:
-        # Drop all tables first to reset the schema and avoid sqlite no column errors
-        await conn.run_sync(Base.metadata.drop_all)
         # Enable WAL mode for better concurrency
         await conn.execute(text("PRAGMA journal_mode=WAL;"))
         # Create all tables (in a real app, use Alembic for migrations)
