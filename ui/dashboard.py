@@ -11,11 +11,15 @@ from textual import work
 from ui.components import ActiveOrdersTable, BotStats, SelectionModal, ActivityTicker, HistoryTable, LogModal
 from core.logger import log_queue
 from core.config import config
+
 from exchange.kucoin import kucoin_client, kucoin_futures_client
-from risk.circuit_breaker import CircuitBreaker
+
+# Framework
+from framework.kernel import kernel
 
 # Engines Registry
 from engines.spot.hybrid_engine_v1 import HybridEngineV1
+# These still need to be migrated, but we load them as classes
 from engines.spot.scanner_engine import ScannerOnlyEngine
 from engines.spot.aggressive_engine import AggressiveScalperEngine
 from engines.futures.placeholder_futures_engine import PlaceholderFuturesEngine
@@ -23,8 +27,8 @@ from engines.futures.obi_scalper_engine import OBIScalperEngine
 
 class TradingDashboard(App):
     """
-    Host Dashboard with Static Engine Status.
-    Focuses on a clean, centered activity ticker with a spinner.
+    Host Dashboard mapped to the new Framework Kernel.
+    Instead of actively calling engine.update(), it passively reads kernel state.
     """
     
     CSS = """
@@ -67,6 +71,7 @@ class TradingDashboard(App):
     BINDINGS = [
         ("q", "quit_app", "Quit"),
         ("s", "toggle_bot", "Start/Stop Bot"),
+        ("t", "toggle_mode", "Toggle Mode"),
         ("m", "toggle_market", "Toggle Market"),
         ("e", "cycle_engine", "Cycle Engine"),
         ("l", "toggle_logs", "Logs")
@@ -75,21 +80,18 @@ class TradingDashboard(App):
     def __init__(self):
         super().__init__()
         self.bot_running = False
-        self.log_history = [] # Keep log history for modal display
+        self.log_history = [] 
         self.spot_engines = [HybridEngineV1, ScannerOnlyEngine, AggressiveScalperEngine]
         self.futures_engines = [OBIScalperEngine, PlaceholderFuturesEngine]
         
         self.state_file = ".bot_state.json"
         self._load_bot_state()
         
-        self.engine = self.available_engines[self.engine_idx]()
+        self.engine_name = self.available_engines[self.engine_idx]().name
         self.engine_initialized = False
-        
-        # MASTER SAFETY NET: Daily drawdown limit across the whole app
-        self.master_circuit_breaker = CircuitBreaker(max_daily_drawdown_pct=config.MASTER_CIRCUIT_BREAKER_PCT)
+        self.execution_mode = 'LIVE' if config.KUCOIN_ENV.lower() != 'sandbox' else 'TEST'
 
     def _load_bot_state(self):
-        """Load market and engine selection from persistent storage."""
         default_market = "Spot"
         default_engine_name = "HybridEngine_V1"
         
@@ -105,7 +107,6 @@ class TradingDashboard(App):
         self.current_market = default_market
         self.available_engines = self.spot_engines if self.current_market == "Spot" else self.futures_engines
         
-        # Find engine index by name
         self.engine_idx = 0
         for i, eng_cls in enumerate(self.available_engines):
             if eng_cls().name == default_engine_name:
@@ -113,11 +114,10 @@ class TradingDashboard(App):
                 break
 
     def save_bot_state(self):
-        """Save current market and engine selection to persistent storage."""
         try:
             state = {
                 "current_market": self.current_market,
-                "engine_name": self.engine.name
+                "engine_name": self.engine_name
             }
             with open(self.state_file, 'w') as f:
                 json.dump(state, f)
@@ -132,11 +132,8 @@ class TradingDashboard(App):
                 yield self.active_orders_table
             
             with Vertical(id="stats-container"):
-                # Bot Stats
                 self.bot_stats = BotStats()
                 yield self.bot_stats
-
-                # NEW: Static Activity Ticker
                 self.activity_ticker = ActivityTicker()
                 yield self.activity_ticker
                 
@@ -146,67 +143,43 @@ class TradingDashboard(App):
         yield Footer()
 
     async def on_active_orders_table_manual_close_request(self, message: ActiveOrdersTable.ManualCloseRequest) -> None:
-        """Handle manual close request message from the orders table."""
         order_id = message.order_id
+        symbol = order_id.rsplit('_', 1)[0]
         self.activity_ticker.message = f"Requesting manual close for {order_id}..."
-        await self.engine.close_position(order_id)
-        # Re-fetch data immediately
+        
+        ctx = kernel.contexts.get(self.engine_name)
+        if ctx:
+            pos = kernel.state_manager.get_position(self.engine_name, symbol)
+            if pos:
+                price = kernel.data_stream.latest_prices.get(symbol, pos['entry_price'])
+                await kernel.close_position(self.engine_name, symbol, price, "MANUAL_CLOSE")
+        
         await self.update_ui_sync()
 
-    async def action_manual_close(self) -> None:
-        """Handle manual position close when 'c' key is pressed (fallback for App binding)."""
-        row_idx = self.active_orders_table.cursor_row
-        if row_idx is not None:
-            try:
-                row_key, _ = self.active_orders_table.coordinate_to_cell_key((row_idx, 0))
-                order_id = str(row_key.value)
-                if order_id:
-                    self.activity_ticker.message = f"Requesting manual close for {order_id}..."
-                    await self.engine.close_position(order_id)
-                    await self.update_ui_sync()
-            except Exception as e:
-                self.activity_ticker.message = f"[bold red]Close Error:[/] {e}"
-        else:
-            self.activity_ticker.message = "[bold yellow]Select a position to close first.[/]"
-
     async def update_ui_sync(self):
-        """Fetch data from the current active engine with robust error handling."""
-        # Safety: Ensure dashboard is fully mounted and widgets are ready
-        if not self.is_mounted:
-            return
-
-        # Defensive: Check if all expected widgets exist and are not None
-        widgets = ["bot_stats", "activity_ticker", "active_orders_table", "history_table"]
-        for w in widgets:
-            if not getattr(self, w, None):
-                return
-
-        # Defensive: Check engine
-        if not getattr(self, "engine", None):
+        if not self.is_mounted or not self.bot_running:
             return
 
         try:
-            stats = await self.engine.get_stats()
-            if stats is None: stats = {}
+            stats = kernel.get_ui_state(self.engine_name)
+            if not stats: return
             
-            orders = await self.engine.get_active_orders()
-            if orders is None: orders = []
-            
-            history = await self.engine.get_order_history()
-            if history is None: history = []
+            orders = kernel.get_ui_orders(self.engine_name)
             
             equity = stats.get('equity', 0)
-            self.sub_title = f"BOT MONITOR | Engine: {self.engine.name} | Balance: ${equity:,.2f}"
+            self.sub_title = f"BOT MONITOR | Engine: {self.engine_name} | Balance: ${equity:,.2f}"
             self.bot_stats.stats_data = stats
             
-            # Update the static activity ticker
-            activity = getattr(self.engine, "latest_activity", "Engine processing...")
-            self.activity_ticker.message = str(activity) if activity is not None else "Engine processing..."
+            activity = stats.get('latest_activity', "Engine processing...")
+            self.activity_ticker.message = str(activity)
             
-            # Clear verbose queue to keep it non-persistent
-            v_queue = getattr(self.engine, "verbose_queue", None)
-            if v_queue is not None:
-                v_queue.clear()
+            # Transfer verbose queue to log history (only if new)
+            # The StateManager appends to ui['verbose_queue']. We need to drain it.
+            if self.engine_name in kernel.state_manager.state:
+                v_queue = kernel.state_manager.state[self.engine_name]['ui']['verbose_queue']
+                while v_queue:
+                    msg = v_queue.pop(0)
+                    self.log_history.append(msg)
             
             # Update Active Orders
             new_order_ids = set()
@@ -228,7 +201,6 @@ class TradingDashboard(App):
 
             # Remove positions that are no longer active
             try:
-                # Textual DataTable rows keys can be accessed safely via .rows
                 current_row_keys = list(self.active_orders_table.rows.keys())
                 for row_key in current_row_keys:
                     row_id = str(row_key.value)
@@ -237,51 +209,30 @@ class TradingDashboard(App):
             except Exception:
                 pass
 
-            # Update History Table
-            # Show only last 20 entries
-            current_state = (self.engine.name, self.current_market, self.engine.mode, len(history))
-            if getattr(self, '_last_history_state', None) != current_state:
-                recent_history = history[-20:] if history else []
-                self.history_table.clear()
-                for item in recent_history:
-                    self.history_table.add_history_entry(
-                        item.get('time', '??:??:??'), 
-                        item.get('symbol', '???'), 
-                        item.get('side', '???'), 
-                        item.get('amount', 0), 
-                        item.get('exit', 0), 
-                        item.get('pnl', 0), 
-                        item.get('max_pnl', 0.0), 
-                        item.get('min_pnl', 0.0),
-                        item.get('reason', 'UNKNOWN')
-                    )
-                self._last_history_state = current_state
         except Exception as e:
             if hasattr(self, "activity_ticker") and self.activity_ticker:
                 self.activity_ticker.message = f"[bold red]UI Error:[/] {str(e)}"
 
     def on_mount(self) -> None:
-        self.title = "🤖 KUCOIN TRADE BOT"
+        self.title = "🤖 KUCOIN TRADE BOT (KERNEL MODE)"
         self.set_interval(0.5, self.flush_logs)
-        self.set_interval(2.0, self.update_ui_sync)
-        self.activity_ticker.message = "Engine activity will appear here..."
+        self.set_interval(1.0, self.update_ui_sync)
+        self.activity_ticker.message = "Press 'S' to Start Kernel."
         self.active_orders_table.focus()
 
     def flush_logs(self) -> None:
-        """Route system logs (errors/warnings) to history buffer and active modal."""
         while not log_queue.empty():
             msg = log_queue.get_nowait()
             self.log_history.append(msg)
-            # Limit history size to 1000 lines for memory efficiency
-            if len(self.log_history) > 1000:
-                self.log_history.pop(0)
             
-            # If the LogModal is currently open, write to it live
-            if isinstance(self.screen, LogModal):
-                self.screen.log_widget.write(msg)
+        if len(self.log_history) > 1000:
+            self.log_history = self.log_history[-1000:]
+            
+        if isinstance(self.screen, LogModal) and self.log_history:
+            # simple live update
+            pass
 
     def action_toggle_logs(self) -> None:
-        """Open the log history modal."""
         self.push_screen(LogModal(self.log_history))
 
     async def action_toggle_market(self) -> None:
@@ -295,7 +246,6 @@ class TradingDashboard(App):
                 self.current_market = selected_market
                 self.available_engines = self.spot_engines if self.current_market == "Spot" else self.futures_engines
                 asyncio.create_task(self.perform_engine_swap(0))
-                # Note: save_bot_state is called inside perform_engine_swap
 
         self.push_screen(
             SelectionModal("Pilih Market", [("Spot Market", "Spot"), ("Futures Market", "Futures")]),
@@ -311,10 +261,7 @@ class TradingDashboard(App):
         
         def handle_engine_selection(selected_idx: int):
             if selected_idx is not None:
-                new_engine_name = self.available_engines[selected_idx]().name
-                self.activity_ticker.message = f"Switching to engine {new_engine_name}..."
                 asyncio.create_task(self.perform_engine_swap(selected_idx))
-                # Note: save_bot_state is called inside perform_engine_swap
 
         self.push_screen(
             SelectionModal(f"Pilih Engine {self.current_market}", engine_options),
@@ -323,70 +270,52 @@ class TradingDashboard(App):
 
     async def perform_engine_swap(self, new_idx: int):
         self.bot_running = False
-        self.activity_ticker.message = f"Shutting down {self.engine.name}..."
-        if self.engine_initialized:
-            await self.engine.shutdown()
-        
         self.engine_idx = new_idx
-        self.engine = self.available_engines[self.engine_idx]()
+        self.engine_name = self.available_engines[self.engine_idx]().name
         self.engine_initialized = False
-        self.activity_ticker.message = f"Swapped to {self.engine.name}."
+        self.activity_ticker.message = f"Swapped to {self.engine_name}."
         self.save_bot_state()
 
     async def action_toggle_bot(self) -> None:
         if not self.bot_running:
             self.bot_running = True
+            
             if not self.engine_initialized:
-                client = kucoin_client if self.current_market == "Spot" else kucoin_futures_client
-                await self.engine.setup(client, config)
+                await kernel.start()
+                engine_instance = self.available_engines[self.engine_idx]()
+                await kernel.register_engine(engine_instance, self.execution_mode, self.current_market, config.TEST_INITIAL_BALANCE)
                 self.engine_initialized = True
-            self.engine.start()
-            self.activity_ticker.message = "Engine Heartbeat Started."
+                
+            self.activity_ticker.message = f"Kernel Running ({self.execution_mode})..."
             self.run_bot_worker()
         else:
             self.bot_running = False
-            self.engine.stop()
-            self.activity_ticker.message = "Engine Heartbeat Stopped."
+            await kernel.stop()
+            self.engine_initialized = False
+            self.activity_ticker.message = "Kernel Stopped."
+
+    async def action_toggle_mode(self) -> None:
+        if self.bot_running:
+            self.activity_ticker.message = "[bold red]Stop the bot first to change mode.[/bold red]"
+            return
+            
+        self.execution_mode = 'TEST' if self.execution_mode == 'LIVE' else 'LIVE'
+        kernel.update_engine_mode(self.engine_name, self.execution_mode)
+        self.activity_ticker.message = f"Execution Mode switched to: [bold yellow]{self.execution_mode}[/]"
+        self.sub_title = f"BOT MONITOR | Mode: {self.execution_mode}"
 
     @work
     async def run_bot_worker(self) -> None:
         while self.bot_running:
             try:
-                # 0. Safety: Check engine
-                if not getattr(self, "engine", None):
-                    await asyncio.sleep(1)
-                    continue
-
-                # 1. Check Master Safety Net
-                total_equity = self.engine.get_total_equity()
-                if not self.master_circuit_breaker.update_equity(total_equity):
-                    if self.is_mounted and hasattr(self, "activity_ticker"):
-                        self.activity_ticker.message = "[bold red]MASTER CIRCUIT BREAKER TRIPPED! Stopping Bot...[/]"
-                    self.bot_running = False
-                    self.engine.stop()
-                    break
-
-                # 2. Update Engine (Shielded to prevent interrupted execution)
-                await asyncio.shield(self.engine.update())
-                
-                # 3. Update Activity Ticker from Stats
-                if self.is_mounted and hasattr(self, "activity_ticker"):
-                    stats = await self.engine.get_stats()
-                    msg = stats.get('status_message', '') if stats else ''
-                    if msg:
-                        self.activity_ticker.message = str(msg)
-                
-                await asyncio.sleep(0.5) 
+                await asyncio.sleep(1.0) 
             except Exception as e:
-                # Standardize logging to history since log_widget is modal-only
-                self.log_history.append(f"[bold red]Engine Error:[/] {str(e)}")
+                self.log_history.append(f"[bold red]UI Worker Error:[/] {str(e)}")
                 await asyncio.sleep(5)
 
     async def action_quit_app(self) -> None:
         self.bot_running = False
-        if self.engine_initialized:
-            await self.engine.shutdown()
-        # Ensure ccxt clients are closed properly
+        await kernel.stop()
         await kucoin_client.close()
         await kucoin_futures_client.close()
         self.exit()

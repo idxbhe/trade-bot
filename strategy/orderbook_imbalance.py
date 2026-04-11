@@ -45,14 +45,14 @@ class OrderBookImbalanceStrategy(BaseStrategy):
         if obi >= self.imbalance_threshold:
             # Massive buy walls / aggressive buyers
             return {
-                'signal': 'LONG', 
+                'signal': 'BUY', 
                 'reason': f'High Buy Imbalance ({obi*100:.1f}%)', 
                 'obi': obi
             }
         elif obi <= (1.0 - self.imbalance_threshold):
             # Massive sell walls / aggressive sellers
             return {
-                'signal': 'SHORT', 
+                'signal': 'SELL', 
                 'reason': f'High Sell Imbalance ({(1-obi)*100:.1f}%)', 
                 'obi': obi
             }

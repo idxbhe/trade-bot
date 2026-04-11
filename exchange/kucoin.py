@@ -1,5 +1,5 @@
 import asyncio
-import ccxt.async_support as ccxt
+import ccxt.pro as ccxt
 from core.config import config
 from core.logger import logger
 
