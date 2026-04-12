@@ -67,6 +67,21 @@ class KuCoinClient:
     async def fetch_ohlcv(self, symbol: str, timeframe: str = '15m', limit: int = 100):
         return await self._safe_call(self.exchange.fetch_ohlcv, symbol, timeframe, limit=limit)
 
+    async def fetch_balance(self) -> float:
+        """Fetch available USDT balance from Trade account."""
+        try:
+            # KuCoin Spot: Funds must be in 'trade' account for the bot to use them
+            balance = await self._safe_call(self.exchange.fetch_balance, params={'type': 'trade'})
+            if balance and 'USDT' in balance:
+                return float(balance['USDT'].get('free', 0.0))
+            
+            # If balance call succeeded but USDT isn't there, it means you have 0 USDT
+            if balance is not None:
+                return 0.0
+        except Exception as e:
+            logger.error(f"Error fetching Spot balance: {e}")
+        return 0.0
+
     async def load_markets(self):
         if not self.exchange.markets:
             await self._safe_call(self.exchange.load_markets)
@@ -119,6 +134,15 @@ class KuCoinFuturesClient(KuCoinClient):
                 logger.warning(f"KuCoin Futures Sandbox mode not supported: {e}. Falling back to live mode.")
         else:
             logger.info("KuCoin Futures API initialized in LIVE mode. (Proceed with caution)")
+
+    async def fetch_balance(self) -> float:
+        """Fetch total wallet equity from Futures account."""
+        balance = await self._safe_call(self.exchange.fetch_balance)
+        if balance and 'USDT' in balance:
+            # For futures, we want total wallet equity (balance + pnl) 
+            # or just free margin. Let's use 'total' for account valuation.
+            return float(balance['USDT']['total'])
+        return 0.0
 
 kucoin_client = KuCoinClient()
 kucoin_futures_client = KuCoinFuturesClient()

@@ -8,7 +8,7 @@ from textual.widgets import Header, Footer, RichLog, DataTable
 from textual.containers import Grid, Container, Vertical
 from textual import work
 
-from ui.components import ActiveOrdersTable, BotStats, SelectionModal, ActivityTicker, HistoryTable, LogModal
+from ui.components import ActiveOrdersTable, BotStats, SelectionModal, ActivityTicker, HistoryTable, LogScreen
 from core.logger import log_queue
 from core.config import config
 
@@ -74,7 +74,8 @@ class TradingDashboard(App):
         ("t", "toggle_mode", "Toggle Mode"),
         ("m", "toggle_market", "Toggle Market"),
         ("e", "cycle_engine", "Cycle Engine"),
-        ("l", "toggle_logs", "Logs")
+        ("l", "toggle_logs", "Logs"),
+        ("o", "show_options", "Options")
     ]
 
     def __init__(self):
@@ -186,14 +187,6 @@ class TradingDashboard(App):
                     reason=h.get('reason', '???')
                 )
             
-            # Transfer verbose queue to log history (only if new)
-            # The StateManager appends to ui['verbose_queue']. We need to drain it.
-            if self.engine_name in kernel.state_manager.state:
-                v_queue = kernel.state_manager.state[self.engine_name]['ui']['verbose_queue']
-                while v_queue:
-                    msg = v_queue.pop(0)
-                    self.log_history.append(msg)
-            
             # Update Active Orders
             new_order_ids = set()
             for item in orders:
@@ -250,12 +243,35 @@ class TradingDashboard(App):
         if len(self.log_history) > 1000:
             self.log_history = self.log_history[-1000:]
             
-        if isinstance(self.screen, LogModal) and self.log_history:
+        if isinstance(self.screen, LogScreen) and self.log_history:
             # simple live update
             pass
 
     def action_toggle_logs(self) -> None:
-        self.push_screen(LogModal(self.log_history))
+        self.push_screen(LogScreen(self.log_history))
+
+    async def action_show_options(self) -> None:
+        if self.bot_running:
+            self.activity_ticker.message = "[bold red]Stop the bot first to access options.[/bold red]"
+            return
+
+        options = [("Reset Trade History", "history")]
+        if self.execution_mode == 'TEST':
+            options.append(("Reset Account Balance", "balance"))
+
+        def handle_option_selection(selected_option: str):
+            if selected_option == "history":
+                kernel.reset_engine_history(self.engine_name)
+                self.history_table.clear()
+                self.activity_ticker.message = "Trade history has been reset."
+            elif selected_option == "balance":
+                kernel.reset_engine_balance(self.engine_name, config.TEST_INITIAL_BALANCE)
+                self.activity_ticker.message = f"Balance reset to ${config.TEST_INITIAL_BALANCE:,.2f}."
+
+        self.push_screen(
+            SelectionModal(f"Options ({self.execution_mode} Mode)", options),
+            handle_option_selection
+        )
 
     async def action_toggle_market(self) -> None:
         if self.bot_running:
@@ -338,10 +354,27 @@ class TradingDashboard(App):
             self.activity_ticker.message = "[bold red]Stop the bot first to change mode.[/bold red]"
             return
             
-        self.execution_mode = 'TEST' if self.execution_mode == 'LIVE' else 'LIVE'
-        kernel.update_engine_mode(self.engine_name, self.execution_mode)
-        self.activity_ticker.message = f"Execution Mode switched to: [bold yellow]{self.execution_mode}[/]"
-        self.sub_title = f"BOT MONITOR | Mode: {self.execution_mode}"
+        if self.is_processing: return
+        self.is_processing = True
+        
+        try:
+            self.execution_mode = 'TEST' if self.execution_mode == 'LIVE' else 'LIVE'
+            self.activity_ticker.message = f"Switching to {self.execution_mode} Mode..."
+            
+            # Clear UI to prevent old mode data from lingering
+            self.history_table.clear()
+            self.active_orders_table.clear()
+            
+            # Perform full state reload in Kernel
+            await kernel.update_engine_mode(
+                self.engine_name, self.execution_mode, 
+                self.current_market, config.TEST_INITIAL_BALANCE
+            )
+            
+            self.activity_ticker.message = f"Switched to: [bold yellow]{self.execution_mode}[/]"
+            self.sub_title = f"BOT MONITOR | Mode: {self.execution_mode}"
+        finally:
+            self.is_processing = False
 
     @work
     async def run_bot_worker(self) -> None:

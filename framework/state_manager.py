@@ -60,7 +60,6 @@ class StateManager:
                 'ui': {
                     'phase': 'IDLE',
                     'message': 'Engine initialized',
-                    'verbose_queue': [],
                     'history_queue': [],
                     'latest_activity': 'Engine ready'
                 }
@@ -96,9 +95,14 @@ class StateManager:
             from sqlalchemy.future import select
             from sqlalchemy import func
             
+            mode = self.state[engine_name]['mode']
+            
             async with async_session() as session:
-                # Positions
-                stmt = select(ActivePosition).where(ActivePosition.engine_name == engine_name)
+                # Positions: Filter by engine AND mode
+                stmt = select(ActivePosition).where(
+                    ActivePosition.engine_name == engine_name,
+                    ActivePosition.mode == mode
+                )
                 result = await session.execute(stmt)
                 records = result.scalars().all()
                 for r in records:
@@ -108,8 +112,11 @@ class StateManager:
                         'max_pnl': r.max_pnl, 'min_pnl': r.min_pnl
                     }
                 
-                # Baselines
-                stmt = select(EquityBaseline).where(EquityBaseline.engine_name == engine_name)
+                # Baselines: Filter by engine AND mode
+                stmt = select(EquityBaseline).where(
+                    EquityBaseline.engine_name == engine_name,
+                    EquityBaseline.mode == mode
+                )
                 result = await session.execute(stmt)
                 record = result.scalars().first()
                 if record:
@@ -125,15 +132,22 @@ class StateManager:
                         'last_reset_yearly': record.last_reset_yearly
                     })
                     
-                # Historical Stats
+                # Historical Stats: Filter by engine AND mode
                 stmt = (select(func.sum(TradeHistory.pnl).label("total_pnl"), func.count(TradeHistory.id).label("trade_count"))
-                        .where(TradeHistory.engine_name == engine_name))
+                        .where(
+                            TradeHistory.engine_name == engine_name,
+                            TradeHistory.mode == mode
+                        ))
                 result = await session.execute(stmt)
                 row = result.first()
                 total_pnl = float(row.total_pnl) if row and row.total_pnl is not None else 0.0
                 trade_count = int(row.trade_count) if row and row.trade_count is not None else 0
                 
-                win_stmt = select(func.count(TradeHistory.id)).where(TradeHistory.engine_name == engine_name, TradeHistory.pnl > 0)
+                win_stmt = select(func.count(TradeHistory.id)).where(
+                    TradeHistory.engine_name == engine_name, 
+                    TradeHistory.mode == mode,
+                    TradeHistory.pnl > 0
+                )
                 win_res = await session.execute(win_stmt)
                 wins = win_res.scalar() or 0
                 win_rate = (wins / trade_count * 100) if trade_count > 0 else 0.0
@@ -144,9 +158,12 @@ class StateManager:
                     'win_rate': win_rate
                 })
 
-                # Fetch recent trade history for UI
+                # Fetch recent trade history for UI: Filter by engine AND mode
                 hist_stmt = (select(TradeHistory)
-                             .where(TradeHistory.engine_name == engine_name)
+                             .where(
+                                 TradeHistory.engine_name == engine_name,
+                                 TradeHistory.mode == mode
+                             )
                              .order_by(TradeHistory.id.desc())
                              .limit(50))
                 hist_res = await session.execute(hist_stmt)
@@ -215,6 +232,37 @@ class StateManager:
             del self.state[engine_name]
             logger.info(f"StateManager: State for '{engine_name}' cleared from memory.")
 
+    def reset_history(self, engine_name: str):
+        """Reset trade history stats in memory and enqueue DB deletion."""
+        if engine_name in self.state:
+            s = self.state[engine_name]
+            s['stats'].update({
+                'total_pnl': 0.0,
+                'trade_count': 0,
+                'win_rate': 0.0
+            })
+            s['ui']['history_queue'].clear()
+            mode = s['mode']
+            self.db_queue.put_nowait(('reset_history', engine_name, mode))
+            self.update_ui_status(engine_name, "SYSTEM", "SYNC", f"History reset for {mode} mode.")
+
+    def reset_balance(self, engine_name: str, new_balance: float):
+        """Reset balance in memory and enqueue DB update (TEST mode only)."""
+        if engine_name in self.state:
+            s = self.state[engine_name]
+            if s['mode'] != 'TEST':
+                return
+            s['equity'] = new_balance
+            s['initial_equity'] = new_balance
+            now = datetime.now()
+            for tf in ['daily', 'weekly', 'monthly', 'yearly']:
+                s['baselines'][tf] = new_balance
+                s['baselines'][f'last_reset_{tf}'] = now
+            
+            mode = s['mode']
+            self.db_queue.put_nowait(('save_equity', engine_name, new_balance, s['baselines'].copy()))
+            self.update_ui_status(engine_name, "SYSTEM", "SYNC", f"Balance reset to ${new_balance:,.2f}.")
+
     def record_history(self, engine_name: str, record: dict):
         if engine_name in self.state:
             s = self.state[engine_name]
@@ -247,8 +295,6 @@ class StateManager:
             icon, color = phase_map.get(phase, ("ℹ", "white"))
             if phase == "SCAN": ui['latest_activity'] = f"{symbol:10} {message}"
             else: ui['latest_activity'] = f"[{phase:8}] {symbol:10} {message}"
-                
-            ui['verbose_queue'].append(f"[{color}]{icon} {phase:8}[/] [bold]{symbol:10}[/] {message}")
 
     def get_ui_state(self, engine_name: str, latest_prices: dict = None) -> dict:
         if engine_name not in self.state: return {}
@@ -326,6 +372,7 @@ class StateManager:
         from core.database import async_session
         from models.trade_history import TradeHistory, ActivePosition, EquityBaseline
         from sqlalchemy.future import select
+        from sqlalchemy import delete
         while True:
             try:
                 task = await self.db_queue.get()
@@ -333,7 +380,12 @@ class StateManager:
                 async with async_session() as session:
                     if action == 'save_equity':
                         _, eng_name, eq, bl = task
-                        stmt = select(EquityBaseline).where(EquityBaseline.engine_name == eng_name)
+                        mode = self.state[eng_name]['mode'] if eng_name in self.state else 'TEST'
+                        
+                        stmt = select(EquityBaseline).where(
+                            EquityBaseline.engine_name == eng_name,
+                            EquityBaseline.mode == mode
+                        )
                         res = await session.execute(stmt)
                         rec = res.scalars().first()
                         if rec:
@@ -348,9 +400,12 @@ class StateManager:
                             rec.last_reset_yearly = bl['last_reset_yearly']
                         else:
                             rec = EquityBaseline(
-                                engine_name=eng_name, current_equity=eq, daily=bl['daily'], weekly=bl['weekly'],
-                                monthly=bl['monthly'], yearly=bl['yearly'], last_reset_daily=bl['last_reset_daily'],
-                                last_reset_weekly=bl['last_reset_weekly'], last_reset_monthly=bl['last_reset_monthly'],
+                                engine_name=eng_name, mode=mode, current_equity=eq, 
+                                daily=bl['daily'], weekly=bl['weekly'],
+                                monthly=bl['monthly'], yearly=bl['yearly'], 
+                                last_reset_daily=bl['last_reset_daily'],
+                                last_reset_weekly=bl['last_reset_weekly'], 
+                                last_reset_monthly=bl['last_reset_monthly'],
                                 last_reset_yearly=bl['last_reset_yearly']
                             )
                             session.add(rec)
@@ -358,7 +413,13 @@ class StateManager:
                         
                     elif action == 'save_position':
                         _, eng_name, sym, pos, side = task
-                        stmt = select(ActivePosition).where(ActivePosition.engine_name == eng_name, ActivePosition.symbol == sym)
+                        mode = self.state[eng_name]['mode'] if eng_name in self.state else 'TEST'
+                        
+                        stmt = select(ActivePosition).where(
+                            ActivePosition.engine_name == eng_name, 
+                            ActivePosition.symbol == sym,
+                            ActivePosition.mode == mode
+                        )
                         res = await session.execute(stmt)
                         rec = res.scalars().first()
                         if rec:
@@ -366,13 +427,23 @@ class StateManager:
                             rec.stop_loss = pos.get('stop_loss', 0.0); rec.take_profit = pos.get('take_profit', 0.0)
                             rec.max_pnl = pos.get('max_pnl', 0.0); rec.min_pnl = pos.get('min_pnl', 0.0)
                         else:
-                            rec = ActivePosition(engine_name=eng_name, symbol=sym, side=side, amount=pos['amount'], entry_price=pos['entry_price'], stop_loss=pos.get('stop_loss', 0.0), take_profit=pos.get('take_profit', 0.0))
+                            rec = ActivePosition(
+                                engine_name=eng_name, symbol=sym, side=side, mode=mode,
+                                amount=pos['amount'], entry_price=pos['entry_price'], 
+                                stop_loss=pos.get('stop_loss', 0.0), take_profit=pos.get('take_profit', 0.0)
+                            )
                             session.add(rec)
                         await session.commit()
                         
                     elif action == 'remove_position':
                         _, eng_name, sym = task
-                        stmt = select(ActivePosition).where(ActivePosition.engine_name == eng_name, ActivePosition.symbol == sym)
+                        mode = self.state[eng_name]['mode'] if eng_name in self.state else 'TEST'
+                        
+                        stmt = select(ActivePosition).where(
+                            ActivePosition.engine_name == eng_name, 
+                            ActivePosition.symbol == sym,
+                            ActivePosition.mode == mode
+                        )
                         res = await session.execute(stmt)
                         rec = res.scalars().first()
                         if rec:
@@ -389,6 +460,15 @@ class StateManager:
                             reason=rec_data.get('reason'), time=rec_data.get('time')
                         )
                         session.add(rec)
+                        await session.commit()
+
+                    elif action == 'reset_history':
+                        _, eng_name, mode = task
+                        stmt = delete(TradeHistory).where(
+                            TradeHistory.engine_name == eng_name,
+                            TradeHistory.mode == mode
+                        )
+                        await session.execute(stmt)
                         await session.commit()
                 self.db_queue.task_done()
             except asyncio.CancelledError: break

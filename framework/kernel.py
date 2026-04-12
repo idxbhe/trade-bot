@@ -7,6 +7,7 @@ from framework.data_stream import DataStream
 from framework.context import TradingContext
 from execution.order_manager import order_manager
 from data.fetcher import market_collector
+from exchange.kucoin import kucoin_client, kucoin_futures_client
 
 class Kernel:
     """
@@ -36,16 +37,28 @@ class Kernel:
         logger.info("Framework Kernel stopped.")
 
     async def load_engine(self, engine_instance, mode: str, market: str, initial_equity: float):
-        """Phase 1: Load state from DB and init memory. No data streaming yet."""
+        """Phase 1: Load state from DB and init memory. Sync real balance if LIVE."""
         name = engine_instance.name
         self.engines[name] = engine_instance
         
-        # 1. Init state memory
+        # 1. Init state memory (pre-load with virtual as placeholder)
         self.state_manager.initialize_engine_state(name, initial_equity, mode, market)
         self.state_manager.state[name]['ui']['phase'] = 'STANDBY'
-        self.state_manager.state[name]['ui']['latest_activity'] = 'Engine Loaded (Standby)'
+        self.state_manager.state[name]['ui']['latest_activity'] = 'Syncing Balance...'
         
-        # 2. Load from DB
+        # 2. Sync Real Balance if LIVE
+        if mode == 'LIVE':
+            is_futures = market.lower() == 'futures'
+            client = kucoin_futures_client if is_futures else kucoin_client
+            try:
+                real_bal = await client.fetch_balance()
+                # We update equity even if it is 0.0 to reflect real account state
+                self.state_manager.update_equity(name, real_bal)
+                logger.info(f"[{name}] Sync complete: Real {market.upper()} Balance is ${real_bal:,.2f}")
+            except Exception as e:
+                logger.error(f"[{name}] Failed to fetch real balance from API: {e}")
+        
+        # 3. Load from DB (overwrites memory with saved values if exist, unless fresh)
         await self.state_manager.load_state_from_db(name)
         
         # Subscribe to tickers for existing positions so UI gets live prices while in standby
@@ -125,13 +138,18 @@ class Kernel:
             
         logger.info(f"Engine '{engine_name}' fully unloaded from memory and network.")
 
-    def update_engine_mode(self, engine_name: str, mode: str):
-        """Change the execution mode (TEST/LIVE) for an engine at runtime."""
-        if engine_name in self.contexts:
-            self.contexts[engine_name].mode = mode
-        if engine_name in self.state_manager.state:
-            self.state_manager.state[engine_name]['mode'] = mode
-        logger.info(f"Engine '{engine_name}' mode updated to: {mode}")
+    async def update_engine_mode(self, engine_name: str, mode: str, market: str, initial_equity: float):
+        """Change the execution mode (TEST/LIVE) for an engine by reloading its state."""
+        if engine_name in self.engines:
+            engine_instance = self.engines[engine_name]
+            
+            # 1. Fully unload old mode state and workers
+            self.unload_engine(engine_name)
+            
+            # 2. Reload with new mode (fetches correct DB history/balance)
+            await self.load_engine(engine_instance, mode, market, initial_equity)
+            
+            logger.info(f"Engine '{engine_name}' successfully switched to mode: {mode}")
 
     # --- Engine API Implementations (Called by TradingContext) ---
     
@@ -319,6 +337,14 @@ class Kernel:
     def get_ui_history(self, engine_name: str) -> list:
         """Called safely by the TUI loop to get new trade history entries."""
         return self.state_manager.get_ui_history(engine_name)
+
+    def reset_engine_history(self, engine_name: str):
+        """Reset trade history stats and clear DB for the current mode."""
+        self.state_manager.reset_history(engine_name)
+
+    def reset_engine_balance(self, engine_name: str, initial_equity: float):
+        """Reset the test balance back to the initial starting equity."""
+        self.state_manager.reset_balance(engine_name, initial_equity)
 
 # Global singleton
 kernel = Kernel()

@@ -25,6 +25,7 @@ class ActivePosition(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     engine_name = Column(String, index=True)
+    mode = Column(String, index=True) # Added to separate modes
     symbol = Column(String, index=True)
     side = Column(String)
     amount = Column(Float)
@@ -39,7 +40,8 @@ class EquityBaseline(Base):
     __tablename__ = "equity_baselines"
 
     id = Column(Integer, primary_key=True, index=True)
-    engine_name = Column(String, unique=True, index=True)
+    engine_name = Column(String, index=True)
+    mode = Column(String, index=True) # Added to separate modes
     current_equity = Column(Float) # Persist the wallet balance
     daily = Column(Float)
     weekly = Column(Float)
