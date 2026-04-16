@@ -20,6 +20,7 @@ class Kernel:
         self.data_stream = DataStream()
         self.engines = {} # active engine instances
         self.contexts = {} # engine_name -> TradingContext
+        self.engine_symbol_locks = {} # engine_name -> {symbol: asyncio.Lock()}
 
     async def start(self):
         """Start background services (DB syncing, Data Streaming)."""
@@ -85,12 +86,24 @@ class Kernel:
         self.state_manager.state[engine_name]['ui']['phase'] = 'IDLE'
         self.state_manager.state[engine_name]['ui']['latest_activity'] = 'Engine starting...'
         
-        # Bind data stream to engine's events
+        if engine_name not in self.engine_symbol_locks:
+            self.engine_symbol_locks[engine_name] = {}
+
+        # Bind data stream to engine's events with per-symbol locking
         async def event_router(symbol: str, data: dict, event_type: str):
-            if event_type == 'tick' and hasattr(engine_instance, 'on_tick'):
-                await engine_instance.on_tick(symbol, data)
-            elif event_type == 'candle' and hasattr(engine_instance, 'on_candle_closed'):
-                await engine_instance.on_candle_closed(symbol, data)
+            if symbol not in self.engine_symbol_locks[engine_name]:
+                self.engine_symbol_locks[engine_name][symbol] = asyncio.Lock()
+                
+            async with self.engine_symbol_locks[engine_name][symbol]:
+                # Mencegah eksekusi antrean (backlog) jika engine baru saja dihentikan
+                current_phase = self.state_manager.state.get(engine_name, {}).get('ui', {}).get('phase')
+                if current_phase == 'STANDBY':
+                    return
+
+                if event_type == 'tick' and hasattr(engine_instance, 'on_tick'):
+                    await engine_instance.on_tick(symbol, data)
+                elif event_type == 'candle' and hasattr(engine_instance, 'on_candle_closed'):
+                    await engine_instance.on_candle_closed(symbol, data)
                 
         is_futures = ctx.market.lower() == 'futures'
         self.data_stream.register_engine(engine_name, event_router, is_futures)
@@ -136,6 +149,9 @@ class Kernel:
         if engine_name in self.contexts:
             del self.contexts[engine_name]
             
+        if engine_name in self.engine_symbol_locks:
+            del self.engine_symbol_locks[engine_name]
+            
         logger.info(f"Engine '{engine_name}' fully unloaded from memory and network.")
 
     async def update_engine_mode(self, engine_name: str, mode: str, market: str, initial_equity: float):
@@ -178,6 +194,19 @@ class Kernel:
         ctx = self.contexts.get(engine_name)
         if not ctx: return False
         
+        # Penyesuaian Harga Post-Only (Maker) menggunakan data real-time Order Book
+        if post_only:
+            best_bid = self.data_stream.latest_bids.get(symbol)
+            best_ask = self.data_stream.latest_asks.get(symbol)
+            
+            if best_bid and best_ask:
+                if side == 'BUY' and price >= best_ask:
+                    self.log(engine_name, f"Post-Only BUY price (${price}) crosses ask. Auto-adjusting to Best Bid (${best_bid}).", "WARNING")
+                    price = best_bid
+                elif side == 'SELL' and price <= best_bid:
+                    self.log(engine_name, f"Post-Only SELL price (${price}) crosses bid. Auto-adjusting to Best Ask (${best_ask}).", "WARNING")
+                    price = best_ask
+
         if ctx.mode == 'LIVE':
             ccxt_side = 'buy' if side == 'BUY' else 'sell'
             leverage = getattr(self.engines[engine_name], 'leverage', 1)
@@ -267,21 +296,36 @@ class Kernel:
                 logger.warning(f"[{engine_name}] Emergency exit triggered for {symbol} (Reason: {reason}). Executing Market Order.")
                 order = await order_manager.execute_market_order(
                     symbol=symbol, side=ccxt_side, amount=pos['amount'],
-                    market=ctx.market, leverage=leverage
+                    market=ctx.market, leverage=leverage, reduce_only=True
                 )
             else:
                 # Standard exit: Limit Order but with post_only=False to ensure execution
                 order = await order_manager.execute_limit_order(
                     symbol=symbol, side=ccxt_side, amount=pos['amount'], price=exit_price,
-                    market=ctx.market, leverage=leverage, post_only=False
+                    market=ctx.market, leverage=leverage, post_only=False, reduce_only=True
                 )
             
             if not order:
                 logger.error(f"[{engine_name}] Failed to close {symbol} via {ctx.market} API ({reason})")
                 return False
                 
-            # Price Reconciliation: Use actual execution price from exchange
-            actual_exit_price = order.get('average') or order.get('price') or exit_price
+            # Price Reconciliation: Resolusi Slippage untuk Matching Engine Asinkron
+            actual_exit_price = order.get('average') or order.get('price')
+            
+            if not actual_exit_price and 'id' in order:
+                client = kucoin_futures_client if ctx.market.lower() == 'futures' else kucoin_client
+                try:
+                    # Beri jeda 500ms agar matching engine bursa memproses market order
+                    await asyncio.sleep(0.5)
+                    fetched_order = await client.exchange.fetch_order(order['id'], symbol)
+                    actual_exit_price = fetched_order.get('average') or fetched_order.get('price')
+                except Exception as e:
+                    logger.warning(f"[{engine_name}] Gagal menarik detail pesanan aktual untuk kalkulasi slippage: {e}")
+            
+            # Fallback terakhir: gunakan harga aktual dari stream WebSocket, BUKAN harga trigger statis (exit_price)
+            if not actual_exit_price:
+                actual_exit_price = self.data_stream.latest_prices.get(symbol, exit_price)
+
             logger.info(f"[{engine_name}] Position {symbol} closed. Requested: ${exit_price:,.2f} | Actual: ${actual_exit_price:,.2f}")
             
         # Update Memory Equity

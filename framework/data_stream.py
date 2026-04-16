@@ -15,9 +15,11 @@ class DataStream:
         self._callbacks: Dict[str, Callable] = {}
         self._running = False
         self.latest_prices: Dict[str, float] = {}
+        self.latest_bids: Dict[str, float] = {}
+        self.latest_asks: Dict[str, float] = {}
         
-        # Active asyncio tasks for streaming
-        self._tasks: set = set()
+        # Active asyncio tasks for streaming mapping (worker_key -> Task)
+        self._tasks: Dict[str, asyncio.Task] = {}
         
         # Track active workers to prevent duplicates
         self._active_ticker_workers: Set[str] = set() # "symbol_futures"
@@ -36,6 +38,34 @@ class DataStream:
             del self._callbacks[engine_name]
         if engine_name in self.subscriptions:
             del self.subscriptions[engine_name]
+            
+        # --- Garbage Collection untuk Orphaned Tasks ---
+        needed_ticker_workers = set()
+        needed_candle_workers = set()
+        
+        for subs in self.subscriptions.values():
+            is_fut = subs['is_futures']
+            for sym in subs['tickers']:
+                needed_ticker_workers.add(f"{sym}_{is_fut}")
+            for sym, tf in subs['candles'].items():
+                needed_candle_workers.add(f"{sym}_{tf}_{is_fut}")
+                
+        for worker_key in list(self._active_ticker_workers):
+            if worker_key not in needed_ticker_workers:
+                if worker_key in self._tasks:
+                    self._tasks[worker_key].cancel()
+                    del self._tasks[worker_key]
+                self._active_ticker_workers.remove(worker_key)
+                logger.info(f"DataStream: Cancelled orphaned ticker worker {worker_key}")
+                
+        for worker_key in list(self._active_candle_workers):
+            if worker_key not in needed_candle_workers:
+                if worker_key in self._tasks:
+                    self._tasks[worker_key].cancel()
+                    del self._tasks[worker_key]
+                self._active_candle_workers.remove(worker_key)
+                logger.info(f"DataStream: Cancelled orphaned candle worker {worker_key}")
+                
         logger.info(f"DataStream: Engine '{engine_name}' unregistered.")
 
     def subscribe_ticker(self, engine_name: str, symbol: str):
@@ -61,7 +91,7 @@ class DataStream:
         if worker_key not in self._active_ticker_workers:
             logger.info(f"DataStream: Spawning dynamic ticker worker for {symbol} (Futures: {is_futures})")
             task = asyncio.create_task(self._watch_ticker_loop(symbol, is_futures))
-            self._tasks.add(task)
+            self._tasks[worker_key] = task
             self._active_ticker_workers.add(worker_key)
 
     def _ensure_candle_worker(self, symbol: str, timeframe: str, is_futures: bool):
@@ -69,7 +99,7 @@ class DataStream:
         if worker_key not in self._active_candle_workers:
             logger.info(f"DataStream: Spawning dynamic candle worker for {symbol} {timeframe} (Futures: {is_futures})")
             task = asyncio.create_task(self._watch_ohlcv_loop(symbol, timeframe, is_futures))
-            self._tasks.add(task)
+            self._tasks[worker_key] = task
             self._active_candle_workers.add(worker_key)
 
     async def start(self):
@@ -89,7 +119,7 @@ class DataStream:
 
     async def stop(self):
         self._running = False
-        for task in self._tasks:
+        for task in self._tasks.values():
             task.cancel()
         self._tasks.clear()
         self._active_ticker_workers.clear()
@@ -103,9 +133,13 @@ class DataStream:
                 # CCXT pro watch_ticker blocks until next update
                 ticker = await client.exchange.watch_ticker(symbol)
                 price = float(ticker.get('last', 0))
+                bid = float(ticker.get('bid', 0))
+                ask = float(ticker.get('ask', 0))
                 if price == 0: continue
                 
                 self.latest_prices[symbol] = price
+                if bid > 0: self.latest_bids[symbol] = bid
+                if ask > 0: self.latest_asks[symbol] = ask
                 
                 # Push to subscribed engines
                 for eng_name, subs in self.subscriptions.items():
@@ -138,7 +172,7 @@ class DataStream:
                     # Fetch historical data dynamically to pass a rich dataframe
                     # Since CCXT cache might not have 50 historical candles natively without fetch_ohlcv
                     try:
-                        ohlcv = await client.exchange.fetch_ohlcv(symbol, timeframe, limit=50)
+                        ohlcv = await client.exchange.fetch_ohlcv(symbol, timeframe, limit=200)
                         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                         df.set_index('timestamp', inplace=True)

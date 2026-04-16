@@ -85,7 +85,7 @@ class MarketDataCollector:
         """Fetch the latest ticker data for a symbol."""
         return await self.client.fetch_ticker(symbol)
 
-    async def get_historical_data(self, symbol: str, timeframe: str = '15m', limit: int = 100) -> pd.DataFrame:
+    async def get_historical_data(self, symbol: str, timeframe: str = '15m', limit: int = 200) -> pd.DataFrame:
         """
         Fetch OHLCV data and convert to Pandas DataFrame.
         """

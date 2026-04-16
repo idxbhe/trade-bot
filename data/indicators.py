@@ -9,7 +9,7 @@ class Indicators:
     @staticmethod
     def calculate_bollinger_bands(df: pd.DataFrame, period: int = 20, std_dev: int = 2, column: str = 'close'):
         sma = Indicators.calculate_sma(df, period, column)
-        std = df[column].rolling(window=period).std()
+        std = df[column].rolling(window=period).std(ddof=0)
         upper_band = sma + (std * std_dev)
         lower_band = sma - (std * std_dev)
         return sma, upper_band, lower_band

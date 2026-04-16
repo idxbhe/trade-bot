@@ -22,7 +22,7 @@ class TradingContext:
         """Ask the kernel to push candle updates to this engine via on_candle_closed()."""
         self._kernel.subscribe_candles(self.engine_name, symbol, timeframe)
 
-    async def get_historical_data(self, symbol: str, timeframe: str = '1m', limit: int = 50) -> pd.DataFrame:
+    async def get_historical_data(self, symbol: str, timeframe: str = '1m', limit: int = 200) -> pd.DataFrame:
         """Pull historical data synchronously for initialization or heavy analysis."""
         return await self._kernel.get_historical_data(symbol, timeframe, limit)
 

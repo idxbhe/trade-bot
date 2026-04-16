@@ -10,7 +10,7 @@ class OrderManager:
     def __init__(self):
         pass
 
-    async def execute_limit_order(self, symbol: str, side: str, amount: float, price: float, market: str, leverage: int = 1, post_only: bool = True) -> Optional[Dict[str, Any]]:
+    async def execute_limit_order(self, symbol: str, side: str, amount: float, price: float, market: str, leverage: int = 1, post_only: bool = True, reduce_only: bool = False) -> Optional[Dict[str, Any]]:
         """
         Executes a Limit Order on KuCoin Spot or Futures.
         Validates minimum amounts and formats precision before sending.
@@ -44,6 +44,8 @@ class OrderManager:
             params = {'postOnly': post_only}
             if is_futures:
                 params['leverage'] = leverage
+                if reduce_only:
+                    params['reduceOnly'] = True
 
             # CCXT wrapper for KuCoin limit orders
             order = await client.exchange.create_order(
@@ -60,7 +62,7 @@ class OrderManager:
             logger.error(f"Failed to place {side.upper()} order for {symbol}: {e}")
             return None
 
-    async def execute_market_order(self, symbol: str, side: str, amount: float, market: str, leverage: int = 1) -> Optional[Dict[str, Any]]:
+    async def execute_market_order(self, symbol: str, side: str, amount: float, market: str, leverage: int = 1, reduce_only: bool = False) -> Optional[Dict[str, Any]]:
         """
         Executes a Market Order on KuCoin Spot or Futures.
         Used for emergency exits where immediate execution is more critical than maker fees.
@@ -87,6 +89,8 @@ class OrderManager:
             params = {}
             if is_futures:
                 params['leverage'] = leverage
+                if reduce_only:
+                    params['reduceOnly'] = True
 
             # CCXT wrapper for KuCoin market orders
             order = await client.exchange.create_order(

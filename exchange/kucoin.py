@@ -136,12 +136,18 @@ class KuCoinFuturesClient(KuCoinClient):
             logger.info("KuCoin Futures API initialized in LIVE mode. (Proceed with caution)")
 
     async def fetch_balance(self) -> float:
-        """Fetch total wallet equity from Futures account."""
+        """Fetch base wallet balance from Futures account (excluding Unrealized PnL)."""
         balance = await self._safe_call(self.exchange.fetch_balance)
         if balance and 'USDT' in balance:
-            # For futures, we want total wallet equity (balance + pnl) 
-            # or just free margin. Let's use 'total' for account valuation.
-            return float(balance['USDT']['total'])
+            # Akses raw API info dari bursa untuk akurasi tingkat tinggi.
+            # Di KuCoin, 'marginBalance' adalah saldo dompet murni (Wallet Balance)
+            # yang belum ditambah dengan Unrealized PnL.
+            info = balance.get('info', {})
+            if isinstance(info, dict) and 'marginBalance' in info:
+                return float(info['marginBalance'])
+            
+            # Fallback jika dictionary info gagal diurai oleh CCXT
+            return float(balance['USDT'].get('free', 0.0)) + float(balance['USDT'].get('used', 0.0))
         return 0.0
 
 kucoin_client = KuCoinClient()
