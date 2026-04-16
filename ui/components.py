@@ -1,12 +1,110 @@
+import plotext as plt
 from textual.app import ComposeResult
 from textual.widgets import Static, DataTable, OptionList, Button, RichLog
 from textual.screen import ModalScreen, Screen
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.message import Message
 from rich.text import Text
 from rich.panel import Panel
 from rich.table import Table
+
+class MetricScreen(Screen):
+    """Screen to display historical PnL metrics via line charts."""
+    
+    DEFAULT_CSS = """
+    MetricScreen {
+        background: $surface;
+        padding: 1;
+    }
+
+    #metrics-container {
+        width: 100%;
+        height: 100%;
+    }
+
+    #metrics-title {
+        text-align: center;
+        width: 100%;
+        margin-bottom: 1;
+        text-style: bold;
+        color: $accent;
+    }
+
+    #metrics-hint {
+        text-align: center;
+        width: 100%;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, engine_name: str, kernel):
+        super().__init__()
+        self.engine_name = engine_name
+        self.kernel = kernel
+
+    def compose(self) -> ComposeResult:
+        with Container(id="metrics-container"):
+            yield Static(f"ENGINE METRICS: {self.engine_name}", id="metrics-title")
+            self.pnl_chart = PnLChart()
+            yield self.pnl_chart
+            yield Static("[Esc / V] Kembali ke Dashboard", id="metrics-hint")
+
+    async def on_mount(self) -> None:
+        # Fetch data from kernel
+        history = await self.kernel.get_daily_pnl_history(self.engine_name)
+        if history:
+            dates = [h['date'] for h in history]
+            pnls = [h['pnl'] for h in history]
+            self.pnl_chart.update_data(dates, pnls)
+        else:
+            self.pnl_chart.message = "No trade history available for this engine/mode."
+        
+        self.focus()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape" or event.key == "v":
+            self.dismiss()
+
+class PnLChart(Static):
+    """A widget that renders a PnL line chart using Plotext."""
+    
+    data_dates = reactive([], always_update=True)
+    data_pnls = reactive([], always_update=True)
+    message = reactive("", always_update=True)
+
+    def update_data(self, dates: list, pnls: list):
+        self.data_dates = dates
+        self.data_pnls = pnls
+
+    def render(self) -> Panel:
+        if self.message:
+            return Panel(self.message, title="Daily PnL History", border_style="blue")
+            
+        if not self.data_dates:
+            return Panel("Loading chart data...", title="Daily PnL History", border_style="blue")
+
+        # Get container size
+        size = self.size
+        width = size.width - 4
+        height = size.height - 4
+
+        # Plotext rendering logic
+        plt.clf()
+        plt.plot(self.data_dates, self.data_pnls, marker="dot", color="cyan")
+        plt.title("Daily PnL History ($)")
+        plt.xlabel("Date")
+        plt.ylabel("PnL ($)")
+        plt.theme("dark")
+        
+        # Adjust size for terminal
+        plt.plotsize(width, height)
+        
+        # Build ANSI string
+        canvas = plt.build()
+        
+        return Panel(Text.from_ansi(canvas), title="[bold blue]Performance Analytics[/bold blue]", border_style="blue")
 
 class LogScreen(Screen):
     """A full-screen view to display system logs."""

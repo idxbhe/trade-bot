@@ -254,30 +254,48 @@ class Kernel:
         pos = self.state_manager.get_position(engine_name, symbol)
         if not pos: return False
         
+        actual_exit_price = exit_price
+        
         if ctx.mode == 'LIVE':
             ccxt_side = 'sell' if pos['side'] == 'LONG' else 'buy'
             leverage = getattr(self.engines[engine_name], 'leverage', 1)
             
-            order = await order_manager.execute_limit_order(
-                symbol=symbol, side=ccxt_side, amount=pos['amount'], price=exit_price,
-                market=ctx.market, leverage=leverage, post_only=True
-            )
+            # Emergency logic for Market Orders
+            emergency_reasons = ['STOP_LOSS', 'MANUAL_CLOSE', 'CIRCUIT_BREAKER', 'DYNAMIC_EXIT']
+            
+            if reason in emergency_reasons:
+                logger.warning(f"[{engine_name}] Emergency exit triggered for {symbol} (Reason: {reason}). Executing Market Order.")
+                order = await order_manager.execute_market_order(
+                    symbol=symbol, side=ccxt_side, amount=pos['amount'],
+                    market=ctx.market, leverage=leverage
+                )
+            else:
+                # Standard exit: Limit Order but with post_only=False to ensure execution
+                order = await order_manager.execute_limit_order(
+                    symbol=symbol, side=ccxt_side, amount=pos['amount'], price=exit_price,
+                    market=ctx.market, leverage=leverage, post_only=False
+                )
+            
             if not order:
-                logger.warning(f"[{engine_name}] Failed to close {symbol} via {ctx.market} API")
+                logger.error(f"[{engine_name}] Failed to close {symbol} via {ctx.market} API ({reason})")
                 return False
+                
+            # Price Reconciliation: Use actual execution price from exchange
+            actual_exit_price = order.get('average') or order.get('price') or exit_price
+            logger.info(f"[{engine_name}] Position {symbol} closed. Requested: ${exit_price:,.2f} | Actual: ${actual_exit_price:,.2f}")
             
         # Update Memory Equity
-        revenue = exit_price * pos['amount']
+        revenue = actual_exit_price * pos['amount']
         current_eq = self.state_manager.get_equity(engine_name)
         
         # PnL Calculation (simulate 0.1% fee)
         fee_rate = 0.001
-        simulated_fees = (pos['entry_price'] * pos['amount'] * fee_rate) + (exit_price * pos['amount'] * fee_rate)
+        simulated_fees = (pos['entry_price'] * pos['amount'] * fee_rate) + (actual_exit_price * pos['amount'] * fee_rate)
         
         if pos['side'] == 'LONG':
-            pnl = (exit_price - pos['entry_price']) * pos['amount'] - simulated_fees
+            pnl = (actual_exit_price - pos['entry_price']) * pos['amount'] - simulated_fees
         else:
-            pnl = (pos['entry_price'] - exit_price) * pos['amount'] - simulated_fees
+            pnl = (pos['entry_price'] - actual_exit_price) * pos['amount'] - simulated_fees
 
         if ctx.market.lower() == 'futures':
             self.state_manager.update_equity(engine_name, current_eq + pnl)
@@ -304,7 +322,7 @@ class Kernel:
             'side': pos['side'],
             'amount': pos['amount'],
             'entry': pos['entry_price'],
-            'exit': exit_price,
+            'exit': actual_exit_price,
             'pnl': pnl,
             'max_pnl': pos.get('max_pnl', 0.0),
             'min_pnl': pos.get('min_pnl', 0.0),
@@ -312,7 +330,7 @@ class Kernel:
             'time': time.strftime("%H:%M:%S")
         })
         
-        self.report_status(engine_name, symbol, "EXEC", f"CLOSE {pos['side']} ({reason}) @ ${exit_price:,.2f} | PnL: ${pnl:,.2f}")
+        self.report_status(engine_name, symbol, "EXEC", f"CLOSE {pos['side']} ({reason}) @ ${actual_exit_price:,.2f} | PnL: ${pnl:,.2f}")
         return True
 
     def log(self, engine_name: str, message: str, level: str):
@@ -337,6 +355,12 @@ class Kernel:
     def get_ui_history(self, engine_name: str) -> list:
         """Called safely by the TUI loop to get new trade history entries."""
         return self.state_manager.get_ui_history(engine_name)
+
+    async def get_daily_pnl_history(self, engine_name: str) -> list:
+        """Retrieve aggregated daily PnL history for the chart."""
+        ctx = self.contexts.get(engine_name)
+        if not ctx: return []
+        return await self.state_manager.get_daily_pnl_history(engine_name, ctx.mode)
 
     def reset_engine_history(self, engine_name: str):
         """Reset trade history stats and clear DB for the current mode."""

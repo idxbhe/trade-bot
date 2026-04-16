@@ -282,6 +282,46 @@ class StateManager:
             return queue
         return []
 
+    async def get_daily_pnl_history(self, engine_name: str, mode: str) -> list:
+        """Retrieve aggregated daily PnL history for the chart."""
+        try:
+            from core.database import async_session
+            from models.trade_history import TradeHistory
+            from sqlalchemy.future import select
+            from sqlalchemy import func
+            
+            async with async_session() as session:
+                # Group by date part of created_at
+                stmt = (
+                    select(
+                        func.date(TradeHistory.created_at).label("date"),
+                        func.sum(TradeHistory.pnl).label("daily_pnl")
+                    )
+                    .where(
+                        TradeHistory.engine_name == engine_name,
+                        TradeHistory.mode == mode
+                    )
+                    .group_by("date")
+                    .order_by("date")
+                )
+                
+                result = await session.execute(stmt)
+                rows = result.all()
+                
+                history = []
+                for row in rows:
+                    # Convert date string/object to a readable format: "Sat - 11 Apr"
+                    dt = datetime.strptime(row.date, "%Y-%m-%d")
+                    formatted_date = dt.strftime("%a - %d %b")
+                    history.append({
+                        "date": formatted_date,
+                        "pnl": float(row.daily_pnl)
+                    })
+                return history
+        except Exception as e:
+            logger.error(f"Failed to fetch daily PnL history: {e}")
+            return []
+
     def update_ui_status(self, engine_name: str, symbol: str, phase: str, message: str):
         if engine_name in self.state:
             ui = self.state[engine_name]['ui']

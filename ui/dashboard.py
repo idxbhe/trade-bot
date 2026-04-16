@@ -8,7 +8,7 @@ from textual.widgets import Header, Footer, RichLog, DataTable
 from textual.containers import Grid, Container, Vertical
 from textual import work
 
-from ui.components import ActiveOrdersTable, BotStats, SelectionModal, ActivityTicker, HistoryTable, LogScreen
+from ui.components import ActiveOrdersTable, BotStats, SelectionModal, ActivityTicker, HistoryTable, LogScreen, MetricScreen
 from core.logger import log_queue
 from core.config import config
 
