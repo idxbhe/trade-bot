@@ -1,128 +1,67 @@
 # Engine Development Guide: Crafting New Trading Brains
 
-This guide provides a strict blueprint for creating new Trading Engines. Follow these rules to ensure your engine is compatible with the Host Dashboard and maintains high operational safety.
+This guide provides the blueprint for creating new Trading Engines compatible with the Kernel-Context architecture.
 
 ## 1. Boilerplate Template
-Every new engine file in `/engines/` must follow this structural contract:
+A modern engine inherits from `BaseEngine` and interacts with the system via the `TradingContext` API.
 
 ```python
 from engines.base_engine import BaseEngine
-from data.fetcher import market_collector
-from data.indicators import Indicators
-import time
+from framework.context import TradingContext
 
 class MyNewEngine(BaseEngine):
     def __init__(self):
         super().__init__("MyUniqueEngineName")
-        self.active_positions = {}
-        self.cached_data = {}
 
-    async def setup(self, exchange_client, config):
-        """Called once when engine is loaded/started."""
-        self.exchange = exchange_client
-        self.config = config
+    async def on_start(self, ctx: TradingContext):
+        """Called once when the engine starts. Subscribe to data here."""
+        self.ctx = ctx
+        await ctx.subscribe_ticker("BTC/USDT")
+        await ctx.subscribe_candles("ETH/USDT", "15m")
+        ctx.log("Engine initialized and subscribed.")
+
+    async def on_tick(self, symbol: str, ticker: dict):
+        """Asynchronously called whenever a new price update arrives."""
+        price = ticker['last']
+        # Implement strategy logic...
+
+    async def on_candle_closed(self, symbol: str, df: pd.DataFrame):
+        """Asynchronously called when a candle closes. 'df' contains 200 bars."""
+        # 'df' is a deep copy; you can modify it safely.
+        # Indicators are already stabilized due to the 200-bar history.
         pass
 
-    async def update(self):
-        """The main execution loop. Called periodically by the Host."""
-        if not self.is_running: return
-        
-        for symbol in self.symbols_to_monitor:
-            # MANDATORY: Check is_running inside loop to allow instant stop
-            if not self.is_running: break 
-            
-            try:
-                self.report_scan(symbol, "Scanning...")
-                # ... fetch data and analyze ...
-                self.report_analyze(symbol, "Analysis complete.")
-                # ... execution logic ...
-            except Exception as e:
-                self.logger.error(f"Error: {e}")
-
-    async def _close_position(self, symbol, price, reason):
-        """Helper to close position and record history."""
-        pos = self.active_positions.pop(symbol)
-        # ... calculate pnl ...
-        
-        # RECORD HISTORY (REQUIRED for UI)
-        self.order_history.append({
-            'time': time.strftime("%H:%M:%S"),
-            'symbol': symbol,
-            'side': 'LONG',
-            'amount': pos['amount'],
-            'entry': pos['entry_price'],
-            'exit': price,
-            'pnl': pnl,
-            'max_pnl': pos.get('max_pnl', 0.0),
-            'min_pnl': pos.get('min_pnl', 0.0),
-            'reason': reason
-        })
-
-    async def get_stats(self) -> dict:
-        """REQUIRED: Return data for the 'Bot Status' panel."""
-        return {
-            'equity': self.get_total_equity(),
-            'mode': 'TEST', 
-            'active_pos_count': len(self.active_positions),
-            'total_pnl': 0.0,
-            # ... other metrics ...
-        }
-
-    def get_total_equity(self) -> float:
-        """REQUIRED: Return current total equity (cash + open positions)."""
-        return self.equity
-
-    async def get_active_orders(self) -> list:
-        """REQUIRED: Return list of dictionaries for ActiveOrdersTable."""
-        return [{
-            'order_id': 'BTC/USDT_LONG',
-            'symbol': 'BTC/USDT',
-            'side': 'LONG',
-            'size': 0.1, # Asset amount
-            'entry': 50000.0,
-            'current': 51000.0,
-            'sl': 49000.0,
-            'tp': 55000.0,
-            'pnl': 100.0
-        }]
-
-    async def close_position(self, order_id: str):
-        """REQUIRED: Handle manual close request from UI (key 'c')."""
-        symbol = order_id.rsplit('_', 1)[0]
-        if symbol in self.active_positions:
-            await self._close_position(symbol, current_price, "MANUAL_CLOSE")
-
-    async def shutdown(self):
-        """Called when engine is switched or bot stopped."""
-        self.stop()
+    async def on_stop(self):
+        """Clean up resources or close positions if needed."""
         pass
 ```
 
-## 2. Core Implementation Rules (Mandatory)
+## 2. Core Implementation Rules
 
-### A. Non-Blocking Operations
-- **NEVER** use `time.sleep()`. It will freeze the entire TUI. 
+### A. Non-Blocking Design
+The Kernel uses an asynchronous event loop. 
+- **NEVER** use `time.sleep()`. 
 - **ALWAYS** use `await asyncio.sleep()`.
+- Logic in `on_tick` and `on_candle_closed` should be efficient to avoid lagging the event queue.
 
-### B. Efficient Data Flow
-- **Throttling:** Do not spam the exchange API. Use a minimum delay of `1.0s` between checking different symbols.
-- **Caching:** Only fetch heavy data (like OHLCV/Candles) once every 60 seconds. Use ticker/last price for real-time monitoring between candle updates.
+### B. Leveraging the TradingContext
+Engines must use the `ctx` object for all external interactions:
+- **Data**: `await ctx.get_historical_data(symbol, limit=200)`
+- **Execution**: `await ctx.buy_limit(symbol, amount, price, sl, tp)`
+- **State**: `ctx.get_position(symbol)`, `ctx.get_equity()`
 
-### C. Standardized Risk Management
-- **Local Risk:** Always initialize `self.risk_manager = PositionSizer(...)` and `self.circuit_breaker = CircuitBreaker(...)` in the `setup()` method.
-- **Circuit Breaker Check:** Always call `self.circuit_breaker.update_equity(self.get_total_equity())` before opening ANY new position.
-- **Sizing:** Use `self.risk_manager.calculate_position_size(...)` to calculate orders.
+### C. Indicator Accuracy
+Calculations must align with exchange standards:
+- **Standard Deviation**: Use `ddof=0` (Population Std Dev) for Bollinger Bands.
+- **Warm-up**: Always request at least **200 bars** of historical data to ensure EWM-based indicators (RSI, ADX, ATR) are fully stabilized.
 
-### D. UI Synchronization
-- `get_stats()`, `get_active_orders()`, and `get_order_history()` should be **fast**. They should read from the engine's internal memory/cache, not perform new API requests.
+### D. Concurrency Safety
+The Kernel ensures that `on_tick` and `on_candle_closed` for the **same symbol** are processed sequentially via symbol-level locks. You do not need to implement internal locking for state shared between these events for the same symbol.
 
-## 3. Integration Checklist
-1. Create your class in `engines/spot/` or `engines/futures/`.
-2. Open `ui/dashboard.py`.
-3. Import your class at the top.
-4. Add your class to either `self.spot_engines` or `self.futures_engines` in `TradingDashboard.__init__`.
+## 3. Risk Management
+- **Automatic Sizing**: The `Kernel` and `OrderManager` handle complex sizing logic, but you must provide accurate `sl` (Stop Loss) and `tp` (Take Profit) values.
+- **Futures Leverage**: If your engine is designated for Futures, the `PositionSizer` will automatically account for leverage in its buying power calculations.
 
 ## 4. Operational Safety
-- **Non-Blocking Loops:** You MUST check `if not self.is_running: break` inside any loop that iterates over symbols in `update()`.
-- **State Isolation:** An engine is a self-contained unit. It should not depend on global variables outside the `engines/` scope except for core utilities.
-- **Error Resilience:** Wrap your `update()` logic in `try-except` blocks. A failure in your scanner should not crash the dashboard.
+- **Post-Only Verification**: By default, `buy_limit` and `sell_limit` use `post_only=True`. The Kernel will automatically adjust your order price to ensure it is a Maker order or log a warning if the spread is too tight.
+- **Error Resilience**: The Kernel wraps engine callbacks in try-except blocks. An error in your engine will be logged but will not crash the entire Framework.

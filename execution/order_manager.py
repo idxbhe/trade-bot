@@ -41,7 +41,10 @@ class OrderManager:
                         logger.warning(f"Order cost is below minimum {min_cost} for {symbol}. Order rejected.")
                         return None
 
-            params = {'postOnly': post_only}
+            params = {}
+            if post_only:
+                params['postOnly'] = True
+
             if is_futures:
                 params['leverage'] = leverage
                 if reduce_only:

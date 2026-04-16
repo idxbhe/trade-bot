@@ -31,7 +31,7 @@ class PositionSizer:
             
         return max(0.0001, sl_price) # Prevent negative or zero stop loss
 
-    def calculate_position_size(self, account_equity: float, entry_price: float, stop_loss_price: float) -> Tuple[float, float]:
+    def calculate_position_size(self, account_equity: float, entry_price: float, stop_loss_price: float, leverage: int = 1) -> Tuple[float, float]:
         """
         Formula: Position Size = (Account Equity * Risk%) / (Entry Price - Stop Loss Price)
         Returns: (size_in_base_asset, total_risk_usd)
@@ -39,6 +39,10 @@ class PositionSizer:
         if account_equity <= 0:
             logger.error("Account equity is zero or negative. Cannot size position.")
             return 0.0, 0.0
+
+        # Leverage validation
+        if leverage < 1:
+            leverage = 1
 
         risk_amount_usd = account_equity * self.max_risk_pct
         price_risk_per_unit = abs(entry_price - stop_loss_price)
@@ -49,11 +53,11 @@ class PositionSizer:
              
         size_in_base_asset = risk_amount_usd / price_risk_per_unit
         
-        # Check if the calculated size exceeds total buying power (no leverage assumed)
-        max_affordable_size = account_equity / entry_price
+        # Check if the calculated size exceeds total buying power (including leverage)
+        max_affordable_size = (account_equity * leverage) / entry_price
         
         if size_in_base_asset > max_affordable_size:
-            logger.warning(f"Calculated size ({size_in_base_asset:.4f}) exceeds account balance. Capping at max affordable ({max_affordable_size:.4f}).")
+            logger.warning(f"Calculated size ({size_in_base_asset:.4f}) exceeds account buying power. Capping at max affordable ({max_affordable_size:.4f}).")
             size_in_base_asset = max_affordable_size * 0.99 # 99% to leave room for fees
             
         actual_risk_usd = size_in_base_asset * price_risk_per_unit

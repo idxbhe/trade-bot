@@ -27,6 +27,7 @@ class DataStream:
         
         # Track last candle timestamps: symbol_timeframe -> last_timestamp
         self._last_candle_ts: Dict[str, int] = {}
+        self._ohlcv_cache: Dict[str, pd.DataFrame] = {}
 
     def register_engine(self, engine_name: str, callback: Callable, is_futures: bool = False):
         self._callbacks[engine_name] = callback
@@ -157,33 +158,64 @@ class DataStream:
         client = kucoin_futures_client if is_futures else kucoin_client
         tracker_key = f"{symbol}_{timeframe}"
         
+        # 1. Warm-up Cache (One-time REST call to populate historical data)
+        if tracker_key not in self._ohlcv_cache:
+            try:
+                logger.info(f"DataStream: Warming up OHLCV cache for {symbol} {timeframe}")
+                ohlcv = await client.exchange.fetch_ohlcv(symbol, timeframe, limit=200)
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                self._ohlcv_cache[tracker_key] = df
+            except Exception as e:
+                logger.error(f"DataStream: Failed to warm up cache for {symbol}: {e}")
+                # We continue anyway, the first tick will attempt to fill it or the next loop will retry
+        
         while self._running:
             try:
+                # CCXT watch_ohlcv returns the full candle list cached in memory
                 candles = await client.exchange.watch_ohlcv(symbol, timeframe)
-                if not candles or len(candles) == 0: continue
+                if not candles or len(candles) < 2: continue
                 
-                latest_candle = candles[-1]
-                timestamp = latest_candle[0]
+                # The last candle in the list is the one CURRENTLY open (live)
+                current_candle = candles[-1]
+                timestamp = current_candle[0]
                 
                 last_ts = self._last_candle_ts.get(tracker_key)
                 
                 # If timestamp changed, the previous candle has CLOSED.
                 if last_ts is not None and timestamp > last_ts:
-                    # Fetch historical data dynamically to pass a rich dataframe
-                    # Since CCXT cache might not have 50 historical candles natively without fetch_ohlcv
-                    try:
-                        ohlcv = await client.exchange.fetch_ohlcv(symbol, timeframe, limit=200)
-                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                        df.set_index('timestamp', inplace=True)
+                    # The finalized candle data is now at the second-to-last position
+                    closed_candle_raw = candles[-2]
+                    
+                    # 2. Update In-Memory Cache (Event-based, Zero REST calls)
+                    if tracker_key in self._ohlcv_cache:
+                        df = self._ohlcv_cache[tracker_key]
                         
+                        # Create a new row with proper datetime index
+                        new_ts = pd.to_datetime(closed_candle_raw[0], unit='ms')
+                        new_row = pd.DataFrame([{
+                            'open': float(closed_candle_raw[1]),
+                            'high': float(closed_candle_raw[2]),
+                            'low': float(closed_candle_raw[3]),
+                            'close': float(closed_candle_raw[4]),
+                            'volume': float(closed_candle_raw[5])
+                        }], index=[new_ts])
+                                             
+                        # Append and maintain a rolling window of 200 bars
+                        df = pd.concat([df, new_row])
+                        if len(df) > 200:
+                            df = df.iloc[-200:]
+                        
+                        self._ohlcv_cache[tracker_key] = df
+                        
+                        # 3. Synchronously push to all subscribed engines
                         for eng_name, subs in self.subscriptions.items():
                             if subs['is_futures'] == is_futures and subs['candles'].get(symbol) == timeframe:
                                 cb = self._callbacks.get(eng_name)
                                 if cb:
-                                    asyncio.create_task(cb(symbol, df, 'candle'))
-                    except Exception as fe:
-                        logger.error(f"Failed fetching historical for closed candle {symbol}: {fe}")
+                                    # Send a copy to prevent engines from mutating shared cache
+                                    asyncio.create_task(cb(symbol, df.copy(), 'candle'))
                 
                 self._last_candle_ts[tracker_key] = timestamp
                 

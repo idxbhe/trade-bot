@@ -1,39 +1,36 @@
-# Trade-Bot Engine Architecture (Plug-and-Play)
+# Trade-Bot Architecture (Kernel-Engine)
 
 ## System Overview
-This bot operates on a **Host-Engine** architecture. The `TradingDashboard` (found in `ui/dashboard.py`) acts as a passive host that handles the Text User Interface (TUI) and user input. All core trading logic, including market scanning, technical analysis, and order execution, is delegated to a "Plug-and-Play" **Engine**.
+The bot operates on a **Kernel-Engine** architecture designed for high-performance WebSocket-driven trading. The **Kernel** (found in `framework/kernel.py`) acts as the central coordinator, managing data streams, engine lifecycles, and concurrent execution safety.
 
-## The Engine Contract (`BaseEngine`)
-Every engine must inherit from `BaseEngine` (located in `engines/base_engine.py`). This ensures the Host can interact with any engine using a standardized interface.
+## Core Components
+### 1. The Kernel (`framework/kernel.py`)
+The "Brain" of the system. It handles:
+- **Concurrency Control**: Maintains per-symbol `asyncio` locks to prevent race conditions during simultaneous ticker and candle events.
+- **Engine Management**: Loads, starts, and unloads engines dynamically.
+- **Order Orchestration**: Interfaces with the `OrderManager` to execute trades with proactive price adjustments (e.g., Post-Only spread protection).
 
-### Mandatory Methods:
-- `async setup(exchange_client, config)`: Initializes the engine with API clients and environment settings.
-- `async update()`: The "heartbeat" of the bot. Performed every cycle to scan the market and execute trades. Must check `self.is_running` to allow clean termination.
-- `async get_stats()`: Returns a dictionary containing performance metrics (Equity, PnL, Mode) for the `BotStats` widget.
-- `async get_active_orders()`: Returns a list of dictionaries containing symbol data for the ActiveOrdersTable.
-- `async get_order_history()`: Returns a list of recently closed positions for the HistoryTable.
-- `async close_position(order_id)`: Handles manual requests to close a specific position.
-- `async shutdown()`: Handles clean exit procedures (e.g., cancelling open orders) before the engine is replaced or the app quits.
+### 2. TradingContext (`framework/context.py`)
+A Dependency Injection (DI) API provided to every engine. Engines interact *only* with the context, which keeps them decoupled from the Kernel's internal complexity.
+- **Subscriptions**: Engines ask the context to subscribe to symbols.
+- **Execution**: Engines call `buy_limit`, `sell_limit`, or `close_position` via the context.
+- **State**: Provides access to equity, positions, and balances.
 
-## How to Add a New Engine (Plug-and-Play)
-1.  **Create:** Add a new file in the `engines/spot/` or `engines/futures/` directory.
-2.  **Implement:** Subclass `BaseEngine` and fill in the mandatory methods.
-3.  **Register:** In `ui/dashboard.py`, import your new class and add it to either `self.spot_engines` or `self.futures_engines` in the `__init__` method.
+### 3. DataStream (`framework/data_stream.py`)
+A robust WebSocket manager using CCXT Pro.
+- **Smart Caching**: Implements in-memory OHLCV caching to eliminate redundant REST API calls and prevent Rate Limit Bans.
+- **Garbage Collection**: Automatically terminates WebSocket workers when no active engine requires them.
 
-## Risk Management Architecture
-The bot uses a two-tier risk management system:
+### 4. Risk Management Layer
+- **PositionSizer**: Calculates sizes based on account equity, risk %, and ATR volatility. Now fully supports **Futures Leverage** for accurate buying power calculation.
+- **Slippage Protection**: Implements a multi-layered price reconciliation (Matching Engine polling + WebSocket fallback) for accurate PnL recording.
 
-1. **Per-Engine Risk (Local):** Each engine instance manages its own `PositionSizer` and `CircuitBreaker`. This allows for different risk profiles:
-   - **Aggressive Scalping:** Tight stop losses (ATR 1.2x) and low risk per trade (0.5%).
-   - **Hybrid/Swing:** Wider stop losses (ATR 2.5x) and moderate risk per trade (1.5%).
-2. **Master Safety Net (Global):** The `TradingDashboard` host maintains a master `CircuitBreaker` that monitors total equity across the active engine. If the total daily drawdown exceeds a global threshold (configurable via `MASTER_CIRCUIT_BREAKER_PCT` in `.env`), the bot will perform an emergency shutdown of the active engine.
-
-## Operational Security
-- **Switching Lock:** Engine selection and Market selection are locked via the UI while the bot is `Running`. You must `Stop` the bot to switch.
-- **Manual Control:** Users can manually close any position by selecting it in the UI and pressing `c`.
+## Operational Safety
+- **Race Condition Prevention**: Per-symbol locking ensures that a new quote doesn't trigger a trade while a previous one is still being processed.
+- **Futures Stability**: Orders are strictly scoped. `reduceOnly` is used only on Futures to prevent accidental "Position Flipping".
+- **Maker-Only Execution**: The Kernel proactively adjusts limit prices based on real-time Order Book depth to ensure "Post-Only" orders are not rejected by the exchange.
 
 ## Current Engines
-1.  **HybridEngineV1:** Active spot trader using Mean Reversion.
-2.  **AggressiveScalperEngine:** High-frequency spot breakout strategy.
-3.  **OBIScalperEngine:** Futures strategy using Order Book Imbalance.
-4.  **ScannerOnlyEngine:** Passive monitor for spot prices.
+1.  **HybridEngineV1**: Spot Mean Reversion.
+2.  **OBIScalperEngine**: Futures Order Book Imbalance scalper.
+3.  **NeutralGridEngine**: Spot market grid maker.
