@@ -232,6 +232,7 @@ class BotStats(Static):
             return Panel("Waiting for bot data...", title="[bold blue]Bot Statistics[/bold blue]", border_style="dim")
             
         equity = self.stats_data.get('equity', 0)
+        available_balance = self.stats_data.get('available_balance', 0)
         mode = self.stats_data.get('mode', 'TEST')
         active_pos_count = self.stats_data.get('active_pos_count', 0)
         
@@ -255,7 +256,8 @@ class BotStats(Static):
         table.add_column(justify="right")
         
         table.add_row("Execution Mode", f"[{'yellow' if mode == 'LIVE' else 'green'}]{mode}[/]")
-        table.add_row("Total Balance", f"${equity:,.2f}")
+        table.add_row("Total Equity", f"${equity:,.2f}")
+        table.add_row("Available Margin", f"${available_balance:,.2f}")
         table.add_row("Active Orders", str(active_pos_count))
         table.add_row("Trade Count", str(trade_count))
         table.add_row("Win Rate", f"{win_rate:.2f}%")

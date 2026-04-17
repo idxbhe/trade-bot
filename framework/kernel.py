@@ -273,12 +273,15 @@ class Kernel:
             base_price = best_bid if best_bid else price
             simulated_price = base_price * (1 - slippage_rate)
             
-        # 2. EQUITY & MARGIN LOGIC: Spot vs Futures
+        # 2. EQUITY & MARGIN LOGIC: Spot vs Futures (TEST Mode Simulation)
+        cost = amount * simulated_price
+        entry_fee = cost * fee_rate
         locked_margin = 0.0
+        
         if ctx.market.lower() == 'futures':
             # Futures Simulation: Calculate Required Margin
             leverage = getattr(self.engines[engine_name], 'leverage', 1)
-            required_margin = (amount * simulated_price) / leverage
+            required_margin = cost / leverage
             
             # Validation: Insufficient Margin Check
             available = self.state_manager.state[engine_name].get('available_balance', 0.0)
@@ -288,13 +291,9 @@ class Kernel:
                 return False
                 
             locked_margin = required_margin
-            # Deduct from available balance immediately
-            self.state_manager.state[engine_name]['available_balance'] -= locked_margin
-        else:
-            # Spot: Subtract full cost + entry fee from cash balance
-            cost = simulated_price * amount
-            fee_cost = cost * fee_rate
-            self.state_manager.update_equity(engine_name, current_eq - (cost + fee_cost))
+            
+        # REALIZED LOSS: Deduct entry fee permanently from equity
+        self.state_manager.update_equity(engine_name, current_eq - entry_fee)
         
         pos_data = {
             'entry_price': simulated_price,
@@ -582,31 +581,28 @@ class Kernel:
         # PnL Calculation (simulate 0.1% fee)
         fee_rate = 0.001
         
-        # Accurate Fee Logic: 
-        # Untuk SPOT TEST, entry fee sudah dipotong di equity saat place_order, 
-        # maka di sini hanya hitung exit fee untuk update equity penutupan.
-        # Untuk FUTURES atau LIVE, kita hitung total biaya (entry + exit).
-        if ctx.mode == 'TEST' and ctx.market.lower() != 'futures':
+        # Consistent Accounting: 
+        # In TEST mode, the entry fee was already deducted in place_order. 
+        # We only calculate the closing fee here for final equity update.
+        if ctx.mode == 'TEST':
             simulated_fees = (exit_price * pos['amount'] * fee_rate)
-            gross_pnl_fees = (pos['entry_price'] * pos['amount'] * fee_rate) + simulated_fees
+            gross_pnl_fees = simulated_fees # Entry fee is already a realized loss
         else:
+            # LIVE mode: PnL from exchange already accounts for both fees
             simulated_fees = (pos['entry_price'] * pos['amount'] * fee_rate) + (exit_price * pos['amount'] * fee_rate)
             gross_pnl_fees = simulated_fees
         
         if pos['side'] == 'LONG':
-            pnl = (exit_price - pos['entry_price']) * pos['amount'] - gross_pnl_fees
+            pnl = (exit_price - pos['entry_price']) * pos['amount'] - (gross_pnl_fees if ctx.mode == 'TEST' else 0.0)
         else:
-            pnl = (pos['entry_price'] - exit_price) * pos['amount'] - gross_pnl_fees
+            pnl = (pos['entry_price'] - exit_price) * pos['amount'] - (gross_pnl_fees if ctx.mode == 'TEST' else 0.0)
 
-        if ctx.market.lower() == 'futures':
-            # PnL di Futures sudah termasuk pengurangan semua fee
-            # PENTING: Kembalikan margin ke available_balance SEBELUM update equity agar rekonsiliasi tepat
-            locked = pos.get('locked_margin', 0.0)
-            self.state_manager.state[engine_name]['available_balance'] += locked
-            self.state_manager.update_equity(engine_name, current_eq + pnl)
-        else:
-            # Spot: Revenue dikurangi biaya penutupan (biaya pembukaan sudah dipotong sebelumnya)
-            self.state_manager.update_equity(engine_name, current_eq + revenue - simulated_fees)
+        # Release Margin before reconciliation
+        pos['locked_margin'] = 0.0
+        self.state_manager.reconcile_margin(engine_name)
+        
+        # Optimistic Update for BOTH modes
+        self.state_manager.update_equity(engine_name, current_eq + pnl)
             
         # Aggregate Stats Fast
         if engine_name in self.state_manager.state:
@@ -767,9 +763,8 @@ class Kernel:
                 for name, state in self.state_manager.state.items():
                     ctx = self.contexts.get(name)
                     if ctx and ctx.mode == 'LIVE':
-                        # We update based on total to account for margin/used funds
-                        self.state_manager.update_equity(name, float(usdt_total))
-                        # logger.debug(f"[{name}] Equity synchronized via WebSocket: ${float(usdt_total):,.2f}")
+                        # DELEGATION: Let StateManager handle the absolute overwrite
+                        self.state_manager._handle_private_balance_update(name, float(usdt_total))
 
     # --- Private Background Tasks ---
 

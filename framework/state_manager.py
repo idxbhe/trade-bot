@@ -234,7 +234,13 @@ class StateManager:
         if engine_name in self.state:
             s = self.state[engine_name]
             total_locked = sum(pos.get('locked_margin', 0.0) for pos in s['positions'].values())
-            s['available_balance'] = s['equity'] - total_locked
+            # MATHEMATICAL FORCE: Pure equity minus all locked margins
+            s['available_balance'] = max(0.0, s['equity'] - total_locked)
+
+    def _handle_private_balance_update(self, engine_name: str, usdt_total: float):
+        """Absolute overwrite of equity from exchange source of truth."""
+        if engine_name in self.state:
+            self.update_equity(engine_name, float(usdt_total))
 
     def _check_and_update_baselines(self, engine_name: str, current_equity: float):
         baselines = self.state[engine_name]['baselines']
