@@ -12,6 +12,24 @@ class OrderManager:
     def __init__(self):
         pass
 
+    async def _normalize_amount(self, symbol: str, amount: float, is_futures: bool, client) -> tuple[float, float]:
+        """
+        Standardizes amount based on market type:
+        - Futures: Converts base nominal to integer contracts.
+        - Spot: Uses CCXT's amount_to_precision.
+        Returns: (formatted_amount_for_api, actual_base_amount_for_bot)
+        """
+        limits = await client.get_market_limits(symbol)
+        if is_futures and limits:
+            contract_size = limits.get('contractSize', 1.0)
+            contracts = int(amount / contract_size)
+            if contracts < 1: return 0.0, 0.0
+            actual_base_amount = contracts * contract_size
+            return float(contracts), actual_base_amount
+        else:
+            fmt_amount = float(client.exchange.amount_to_precision(symbol, amount))
+            return fmt_amount, fmt_amount
+
     async def execute_limit_order(self, engine_name: str, symbol: str, side: str, amount: float, price: float, market: str, leverage: int = 1, post_only: bool = True, reduce_only: bool = False) -> Optional[Dict[str, Any]]:
         """
         Executes a Limit Order on KuCoin Spot or Futures.
@@ -25,19 +43,18 @@ class OrderManager:
         try:
             await client.load_markets()
             
-            # Use CCXT's built-in precision formatting
-            formatted_amount = client.exchange.amount_to_precision(symbol, amount)
+            # Step 1: Normalize amount and get actual base nominal
+            formatted_amount, actual_base_amount = await self._normalize_amount(symbol, amount, is_futures, client)
+            if formatted_amount <= 0:
+                logger.warning(f"Order amount is below minimum limit for {symbol}. Order rejected.")
+                return None
+                
             formatted_price = client.exchange.price_to_precision(symbol, price)
             
-            # Check minimums
-            limits = await client.get_market_limits(symbol)
-            if limits and 'limits' in limits:
-                min_amount = limits['limits'].get('amount', {}).get('min', 0)
-                if Decimal(str(formatted_amount)) < Decimal(str(min_amount)):
-                    logger.warning(f"Order amount {formatted_amount} is below minimum {min_amount} for {symbol}. Order rejected.")
-                    return None
-                    
-                if not is_futures:
+            # Step 2: Check minimum cost only for Spot
+            if not is_futures:
+                limits = await client.get_market_limits(symbol)
+                if limits and 'limits' in limits:
                     min_cost = limits['limits'].get('cost', {}).get('min', 0)
                     if (Decimal(str(formatted_amount)) * Decimal(str(formatted_price))) < Decimal(str(min_cost)):
                         logger.warning(f"Order cost is below minimum {min_cost} for {symbol}. Order rejected.")
@@ -59,11 +76,14 @@ class OrderManager:
                 symbol=symbol,
                 type='limit',
                 side=side.lower(),
-                amount=float(formatted_amount),
+                amount=formatted_amount,
                 price=float(formatted_price),
                 params=params
             )
-            logger.info(f"Order Placed Successfully: ID {order.get('id')}")
+            logger.info(f"Order Placed Successfully: ID {order.get('id')} (Actual Base: {actual_base_amount})")
+            
+            # Feedback Loop: Attach actual base nominal to order result
+            order['bot_actual_amount'] = actual_base_amount
             return order
         except Exception as e:
             logger.error(f"Failed to place {side.upper()} order for {symbol}: {e}")
@@ -82,16 +102,11 @@ class OrderManager:
         try:
             await client.load_markets()
             
-            # Use CCXT's built-in precision formatting
-            formatted_amount = client.exchange.amount_to_precision(symbol, amount)
-            
-            # Check minimums
-            limits = await client.get_market_limits(symbol)
-            if limits and 'limits' in limits:
-                min_amount = limits['limits'].get('amount', {}).get('min', 0)
-                if Decimal(str(formatted_amount)) < Decimal(str(min_amount)):
-                    logger.warning(f"Market order amount {formatted_amount} is below minimum {min_amount} for {symbol}. Order rejected.")
-                    return None
+            # Normalize amount
+            formatted_amount, actual_base_amount = await self._normalize_amount(symbol, amount, is_futures, client)
+            if formatted_amount <= 0:
+                logger.warning(f"Market order amount is below minimum for {symbol}. Order rejected.")
+                return None
 
             params = {}
             if is_futures:
@@ -104,10 +119,13 @@ class OrderManager:
                 symbol=symbol,
                 type='market',
                 side=side.lower(),
-                amount=float(formatted_amount),
+                amount=formatted_amount,
                 params=params
             )
-            logger.info(f"Market Order Placed Successfully: ID {order.get('id')}")
+            logger.info(f"Market Order Placed Successfully: ID {order.get('id')} (Actual Base: {actual_base_amount})")
+            
+            # Feedback Loop: Attach actual base nominal to order result
+            order['bot_actual_amount'] = actual_base_amount
             return order
         except Exception as e:
             logger.error(f"Failed to place {side.upper()} MARKET order for {symbol}: {e}")
@@ -167,7 +185,13 @@ class OrderManager:
         client = kucoin_futures_client
         try:
             await client.load_markets()
-            fmt_amount = client.exchange.amount_to_precision(symbol, amount)
+            
+            # Normalize amount
+            formatted_amount, actual_base_amount = await self._normalize_amount(symbol, amount, True, client)
+            if formatted_amount <= 0:
+                logger.warning(f"Conditional amount is below minimum for {symbol}. Rejected.")
+                return None
+                
             fmt_trigger = client.exchange.price_to_precision(symbol, trigger_price)
             
             params = {
@@ -182,10 +206,13 @@ class OrderManager:
                 symbol=symbol,
                 type='market',
                 side=side.lower(),
-                amount=float(fmt_amount),
+                amount=formatted_amount,
                 params=params
             )
-            logger.info(f"Conditional Order Placed: ID {order.get('id')}")
+            logger.info(f"Conditional Order Placed: ID {order.get('id')} (Actual Base: {actual_base_amount})")
+            
+            # Feedback Loop
+            order['bot_actual_amount'] = actual_base_amount
             return order
         except Exception as e:
             logger.error(f"Failed to place {stop_type} conditional order for {symbol}: {e}")

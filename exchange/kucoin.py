@@ -141,7 +141,8 @@ class KuCoinClient:
             market = self.exchange.markets[symbol]
             return {
                 'precision': market.get('precision', {}),
-                'limits': market.get('limits', {})
+                'limits': market.get('limits', {}),
+                'contractSize': market.get('contractSize', 1.0)
             }
         return None
 
@@ -202,16 +203,19 @@ class KuCoinFuturesClient(KuCoinClient):
     async def fetch_active_positions(self) -> list:
         """Futures Reconcile: Calls fetch_positions and returns standardized list."""
         try:
+            await self.load_markets()
             raw_positions = await self._safe_call(self.exchange.fetch_positions)
             if not raw_positions: return []
             
             positions = []
             for p in raw_positions:
-                amount = abs(float(p.get('contracts', 0.0)))
-                if amount > 0:
+                contracts = abs(float(p.get('contracts', 0.0)))
+                if contracts > 0:
+                    symbol = p.get('symbol')
+                    contract_size = self.exchange.markets.get(symbol, {}).get('contractSize', 1.0)
                     positions.append({
-                        'symbol': p.get('symbol'),
-                        'amount': amount,
+                        'symbol': symbol,
+                        'amount': contracts * contract_size,  # Konversi ke nominal base currency
                         'entry_price': float(p.get('entryPrice', 0.0)),
                         'side': p.get('side', '').upper() # 'LONG' or 'SHORT'
                     })

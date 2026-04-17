@@ -244,15 +244,17 @@ class Kernel:
             )
             if not order: return False
             
-            # PENDING ORDER LOGIC: Simpan sebagai pending, jangan langsung buka posisi
+            # PENDING ORDER LOGIC: Use actual amount from feedback loop
             order_id = order.get('id')
+            actual_amount = order.get('bot_actual_amount', amount)
+            
             self.state_manager.add_pending_order(engine_name, order_id, {
-                'symbol': symbol, 'side': side, 'amount': amount, 'price': price,
+                'symbol': symbol, 'side': side, 'amount': actual_amount, 'price': price,
                 'sl': sl, 'tp': tp, 'time': time.time()
             })
             
             # Log pending status
-            self.report_status(engine_name, symbol, "EXEC", f"PENDING {side} {amount:.4f} @ ${price:,.2f} (ID: {order_id})")
+            self.report_status(engine_name, symbol, "EXEC", f"PENDING {side} {actual_amount:.4f} @ ${price:,.2f} (ID: {order_id})")
             return True
                 
         # Update Memory State Instantly (Hanya untuk TEST mode)
