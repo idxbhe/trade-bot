@@ -21,16 +21,11 @@ class Kernel:
         self.engines = {} # active engine instances
         self.contexts = {} # engine_name -> TradingContext
         self.engine_symbol_locks = {} # engine_name -> {symbol: asyncio.Lock()}
-        self._pending_tracker_task = None
 
     async def start(self):
-        """Start background services (DB syncing, Data Streaming, Order Tracking)."""
+        """Start background services (DB syncing and Data Streaming)."""
         self.state_manager.start_sync_loop()
         await self.data_stream.start()
-        
-        if not self._pending_tracker_task:
-            self._pending_tracker_task = asyncio.create_task(self._watch_pending_orders())
-            
         logger.info("Framework Kernel started.")
 
     async def stop(self):
@@ -39,14 +34,6 @@ class Kernel:
             if hasattr(eng, 'shutdown'):
                 await eng.shutdown()
         
-        if self._pending_tracker_task:
-            self._pending_tracker_task.cancel()
-            try:
-                await self._pending_tracker_task
-            except asyncio.CancelledError:
-                pass
-            self._pending_tracker_task = None
-
         await self.data_stream.stop()
         await self.state_manager.stop_sync_loop()
         logger.info("Framework Kernel stopped.")
@@ -73,7 +60,12 @@ class Kernel:
             except Exception as e:
                 logger.error(f"[{name}] Failed to fetch real balance from API: {e}")
         
-        # 3. Load from DB (overwrites memory with saved values if exist, unless fresh)
+        # 3. Add Private WebSocket Monitoring if LIVE
+        if mode == 'LIVE':
+            self.data_stream.register_private_callback("KERNEL_SYSTEM", self._handle_private_data)
+            self.data_stream._ensure_private_workers(market.lower() == 'futures')
+
+        # 4. Load from DB (overwrites memory with saved values if exist, unless fresh)
         await self.state_manager.load_state_from_db(name)
         
         # Subscribe to tickers for existing positions so UI gets live prices while in standby
@@ -291,6 +283,9 @@ class Kernel:
 
         self.report_status(engine_name, symbol, "EXEC", "Manual Close requested...")
         
+        # Kill exchange protections before manual close to avoid double execution
+        await self._cancel_position_protection(engine_name, symbol)
+        
         success = await self.close_position(engine_name, symbol, price, "MANUAL_CLOSE")
         
         if success:
@@ -334,37 +329,38 @@ class Kernel:
                 logger.error(f"[{engine_name}] Failed to close {symbol} via {ctx.market} API ({reason})")
                 return False
                 
-            # Price Reconciliation: Resolusi Slippage untuk Matching Engine Asinkron
-            actual_exit_price = order.get('average') or order.get('price')
+            # Bersihkan proteksi di bursa jika penutupan dipicu oleh Sinyal/Manual (selain SL itu sendiri)
+            if reason != 'STOP_LOSS':
+                await self._cancel_position_protection(engine_name, symbol)
             
-            if not actual_exit_price and 'id' in order:
-                client = kucoin_futures_client if ctx.market.lower() == 'futures' else kucoin_client
-                try:
-                    # Beri jeda 500ms agar matching engine bursa memproses market order
-                    await asyncio.sleep(0.5)
-                    fetched_order = await client.exchange.fetch_order(order['id'], symbol)
-                    actual_exit_price = fetched_order.get('average') or fetched_order.get('price')
-                except Exception as e:
-                    logger.warning(f"[{engine_name}] Gagal menarik detail pesanan aktual untuk kalkulasi slippage: {e}")
-            
-            # Fallback terakhir: gunakan harga aktual dari stream WebSocket, BUKAN harga trigger statis (exit_price)
             if not actual_exit_price:
                 actual_exit_price = self.data_stream.latest_prices.get(symbol, exit_price)
 
-            logger.info(f"[{engine_name}] Position {symbol} closed. Requested: ${exit_price:,.2f} | Actual: ${actual_exit_price:,.2f}")
-            
+            logger.info(f"[{engine_name}] Position {symbol} close request sent. Reason: {reason}")
+            return True
+                
+        return await self._finalize_position_close(engine_name, symbol, actual_exit_price, reason)
+
+    async def _finalize_position_close(self, engine_name: str, symbol: str, exit_price: float, reason: str) -> bool:
+        """Finalize state and history once a closure is confirmed (Live or Test)."""
+        pos = self.state_manager.get_position(engine_name, symbol)
+        if not pos: return False
+        
+        ctx = self.contexts.get(engine_name)
+        if not ctx: return False
+        
         # Update Memory Equity
-        revenue = actual_exit_price * pos['amount']
+        revenue = exit_price * pos['amount']
         current_eq = self.state_manager.get_equity(engine_name)
         
         # PnL Calculation (simulate 0.1% fee)
         fee_rate = 0.001
-        simulated_fees = (pos['entry_price'] * pos['amount'] * fee_rate) + (actual_exit_price * pos['amount'] * fee_rate)
+        simulated_fees = (pos['entry_price'] * pos['amount'] * fee_rate) + (exit_price * pos['amount'] * fee_rate)
         
         if pos['side'] == 'LONG':
-            pnl = (actual_exit_price - pos['entry_price']) * pos['amount'] - simulated_fees
+            pnl = (exit_price - pos['entry_price']) * pos['amount'] - simulated_fees
         else:
-            pnl = (pos['entry_price'] - actual_exit_price) * pos['amount'] - simulated_fees
+            pnl = (pos['entry_price'] - exit_price) * pos['amount'] - simulated_fees
 
         if ctx.market.lower() == 'futures':
             self.state_manager.update_equity(engine_name, current_eq + pnl)
@@ -391,7 +387,7 @@ class Kernel:
             'side': pos['side'],
             'amount': pos['amount'],
             'entry': pos['entry_price'],
-            'exit': actual_exit_price,
+            'exit': exit_price,
             'pnl': pnl,
             'max_pnl': pos.get('max_pnl', 0.0),
             'min_pnl': pos.get('min_pnl', 0.0),
@@ -399,7 +395,7 @@ class Kernel:
             'time': time.strftime("%H:%M:%S")
         })
         
-        self.report_status(engine_name, symbol, "EXEC", f"CLOSE {pos['side']} ({reason}) @ ${actual_exit_price:,.2f} | PnL: ${pnl:,.2f}")
+        self.report_status(engine_name, symbol, "EXEC", f"CLOSE {pos['side']} ({reason}) @ ${exit_price:,.2f} | PnL: ${pnl:,.2f}")
         return True
 
     def log(self, engine_name: str, message: str, level: str):
@@ -439,58 +435,89 @@ class Kernel:
         """Reset the test balance back to the initial starting equity."""
         self.state_manager.reset_balance(engine_name, initial_equity)
 
-    # --- Private Background Tasks ---
+    async def _handle_private_data(self, data: dict, event_type: str):
+        """Unified entry point for private WebSocket events (Orders & Balance)."""
+        if event_type == 'order':
+            await self._handle_private_order_update(data)
+        elif event_type == 'balance':
+            await self._handle_private_balance_update(data)
 
-    async def _watch_pending_orders(self):
-        """Background task to poll status of pending orders from the exchange."""
-        logger.info("Background Order Tracker started.")
-        while True:
-            try:
-                # Ambil snapshot engine names untuk menghindari RuntimeError: dictionary changed size
-                engine_names = list(self.state_manager.state.keys())
-                for engine_name in engine_names:
-                    s = self.state_manager.state.get(engine_name)
-                    if not s: continue
-                    
-                    pending = s.get('pending_orders', {})
-                    if not pending: continue
-                        
-                    ctx = self.contexts.get(engine_name)
-                    if not ctx or ctx.mode != 'LIVE': continue
-                    
-                    is_futures = ctx.market.lower() == 'futures'
-                    client = kucoin_futures_client if is_futures else kucoin_client
-                    
-                    # Ambil snapshot order IDs
-                    order_ids = list(pending.keys())
-                    for order_id in order_ids:
-                        # Re-verify existence because it might have been removed in this loop
-                        if order_id not in pending: continue
-                        
-                        try:
-                            order_info = pending[order_id]
-                            symbol = order_info['symbol']
-                            
-                            # Poll status from exchange
-                            order = await client.exchange.fetch_order(order_id, symbol)
-                            status = order.get('status')
-                            
-                            if status == 'closed':
-                                await self._handle_order_fill(engine_name, order_id, order_info, order)
-                            elif status in ['canceled', 'cancelled', 'expired', 'rejected']:
-                                await self._handle_order_cancel(engine_name, order_id, order_info, status.upper())
-                            
-                            # Jeda singkat antar pesanan untuk menghindari rate limit
-                            await asyncio.sleep(0.5) 
-                        except Exception as e:
-                            logger.error(f"Error fetching status for order {order_id}: {e}")
-                            
-                await asyncio.sleep(2) 
-            except asyncio.CancelledError:
+    async def _handle_private_order_update(self, order: dict):
+        """Processes real-time order status updates from CCXT Pro."""
+        order_id = order.get('id')
+        symbol = order.get('symbol')
+        status = order.get('status')
+        
+        if not order_id or not symbol: return
+
+        # Identify which engine owns this order
+        target_engine = None
+        order_type = None # 'PENDING', 'PROTECTION', 'CLOSING'
+        
+        for name, state in self.state_manager.state.items():
+            # 1. Check Pending Orders
+            if order_id in state.get('pending_orders', {}):
+                target_engine = name
+                order_type = 'PENDING'
                 break
-            except Exception as e:
-                logger.error(f"Global Order Tracker Error: {e}")
-                await asyncio.sleep(5)
+            
+            # 2. Check Active Positions for SL/TP
+            pos = state.get('positions', {}).get(symbol)
+            if pos:
+                if order_id in [pos.get('sl_order_id'), pos.get('tp_order_id')]:
+                    target_engine = name
+                    order_type = 'PROTECTION'
+                    break
+                    
+                # 3. Check if it's a manual/signal closure (we don't track the ID explicitly yet, 
+                # but we can infer if the side is opposite to position side)
+                pos_side = pos.get('side') # LONG or SHORT
+                order_side = 'BUY' if order.get('side') == 'buy' else 'SELL'
+                if (pos_side == 'LONG' and order_side == 'SELL') or (pos_side == 'SHORT' and order_side == 'BUY'):
+                    target_engine = name
+                    order_type = 'CLOSING'
+                    break
+
+        if not target_engine:
+            return
+
+        if status == 'closed':
+            logger.info(f"[{target_engine}] Order FILLED real-time: {symbol} (Type: {order_type}, ID: {order_id})")
+            if order_type == 'PENDING':
+                order_info = self.state_manager.state[target_engine]['pending_orders'][order_id]
+                await self._handle_order_fill(target_engine, order_id, order_info, order)
+            elif order_type == 'PROTECTION':
+                await self._handle_protection_fill(target_engine, symbol, order)
+            elif order_type == 'CLOSING':
+                # Process closure finalization
+                price = order.get('average') or order.get('price')
+                # The exact reason could be signaled by previous close_position call, 
+                # but for simplicity we use SIGNAL_CLOSE or analyze order comments if available.
+                await self._finalize_position_close(target_engine, symbol, price, "SIGNAL_CLOSE")
+                
+        elif status in ['canceled', 'cancelled', 'expired', 'rejected']:
+            if order_type == 'PENDING':
+                order_info = self.state_manager.state[target_engine]['pending_orders'][order_id]
+                await self._handle_order_cancel(target_engine, order_id, order_info, status.upper())
+
+    async def _handle_private_balance_update(self, balance: dict):
+        """Processes real-time balance updates to keep equity in sync."""
+        # CCXT balance structure contains free/used/total
+        # We look for USDT for simplicity as it's our quote currency
+        if 'USDT' in balance:
+            usdt_total = balance['USDT'].get('total')
+            if usdt_total is not None:
+                # Update all engines running in LIVE mode on the same market
+                # In a multi-account setup, we'd need to filter by account, 
+                # but here we assume one account per client type (Spot/Futures).
+                for name, state in self.state_manager.state.items():
+                    ctx = self.contexts.get(name)
+                    if ctx and ctx.mode == 'LIVE':
+                        # We update based on total to account for margin/used funds
+                        self.state_manager.update_equity(name, float(usdt_total))
+                        # logger.debug(f"[{name}] Equity synchronized via WebSocket: ${float(usdt_total):,.2f}")
+
+    # --- Private Background Tasks ---
 
     async def _handle_order_fill(self, engine_name: str, order_id: str, order_info: dict, exchange_order: dict):
         """Finalize order execution once it is confirmed FILLED by the exchange."""
@@ -524,6 +551,36 @@ class Kernel:
         
         # UI & Memory swap
         self.state_manager.remove_pending_order(engine_name, order_id)
+        
+        # ATTACH EXCHANGE PROTECTION (LIVE MODE ONLY)
+        if ctx.mode == 'LIVE':
+            try:
+                if ctx.market.lower() == 'futures':
+                    # Futures Protection (Stop Market)
+                    side_to_close = 'SELL' if pos_side == 'LONG' else 'BUY'
+                    stop_type = 'down' if pos_side == 'LONG' else 'up'
+                    leverage = getattr(self.engines[engine_name], 'leverage', 1)
+                    
+                    if sl > 0:
+                        order_sl = await order_manager.execute_conditional_order(symbol, side_to_close, amount, sl, ctx.market, stop_type, leverage)
+                        if order_sl: pos_data['sl_order_id'] = order_sl.get('id')
+                    
+                    # Optional: Take Profit for Futures via another stop order
+                    if tp > 0:
+                        tp_type = 'up' if pos_side == 'LONG' else 'down'
+                        order_tp = await order_manager.execute_conditional_order(symbol, side_to_close, amount, tp, ctx.market, tp_type, leverage)
+                        if order_tp: pos_data['tp_order_id'] = order_tp.get('id')
+                else:
+                    # Spot Protection (OCO)
+                    if sl > 0 and tp > 0:
+                        oco_res = await order_manager.execute_oco_order(symbol, 'SELL', amount, tp, sl, ctx.market)
+                        if oco_res:
+                            # OCO ID serves for both SL and TP monitoring
+                            pos_data['sl_order_id'] = oco_res.get('orderId')
+                            pos_data['tp_order_id'] = oco_res.get('orderId')
+            except Exception as e:
+                logger.error(f"Critical: Failed to attach exchange protection for {symbol}: {e}")
+
         self.state_manager.add_position(engine_name, symbol, pos_data, pos_side)
         
         self.report_status(engine_name, symbol, "SYNC", f"FILLED {pos_side} {amount:.4f} @ ${price:,.2f}")
@@ -535,6 +592,31 @@ class Kernel:
         self.state_manager.remove_pending_order(engine_name, order_id)
         self.report_status(engine_name, symbol, "SYNC", f"Order {status}")
         logger.warning(f"[{engine_name}] Pending order {order_id} for {symbol} was {status}.")
+
+    async def _cancel_position_protection(self, engine_name: str, symbol: str):
+        """Cancel any outstanding exchange-side SL/TP orders for a position."""
+        pos = self.state_manager.get_position(engine_name, symbol)
+        if not pos: return
+        
+        ctx = self.contexts.get(engine_name)
+        if not ctx or ctx.mode != 'LIVE': return
+        
+        # Spot OCO uses the same ID for both parts usually, or we catch both
+        sl_id = pos.get('sl_order_id')
+        tp_id = pos.get('tp_order_id')
+        
+        if sl_id:
+            await order_manager.cancel_order(sl_id, symbol, ctx.market)
+        if tp_id and tp_id != sl_id:
+            await order_manager.cancel_order(tp_id, symbol, ctx.market)
+
+    async def _handle_protection_fill(self, engine_name: str, symbol: str, exchange_order: dict):
+        """Finalize position closure when an exchange-side protection order triggers."""
+        price = exchange_order.get('average') or exchange_order.get('price')
+        logger.info(f"[{engine_name}] Protection trigger confirmed for {symbol} @ ${price:,.2f}")
+        
+        # We call the normal close_position but with 'STOP_LOSS' reason to avoid re-cancelling protection
+        await self.close_position(engine_name, symbol, price, "STOP_LOSS")
 
 # Global singleton
 kernel = Kernel()

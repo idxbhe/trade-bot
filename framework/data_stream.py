@@ -13,6 +13,7 @@ class DataStream:
         # engine_name -> { 'tickers': set(), 'candles': {symbol: timeframe}, 'is_futures': bool }
         self.subscriptions: Dict[str, Dict[str, set|dict|bool]] = {}
         self._callbacks: Dict[str, Callable] = {}
+        self.private_callbacks: Dict[str, Callable] = {}
         self._running = False
         self.latest_prices: Dict[str, float] = {}
         self.latest_bids: Dict[str, float] = {}
@@ -24,6 +25,7 @@ class DataStream:
         # Track active workers to prevent duplicates
         self._active_ticker_workers: Set[str] = set() # "symbol_futures"
         self._active_candle_workers: Set[str] = set() # "symbol_timeframe_futures"
+        self._active_private_workers: Set[str] = set() # "spot", "futures"
         
         # Track last candle timestamps: symbol_timeframe -> last_timestamp
         self._last_candle_ts: Dict[str, int] = {}
@@ -39,6 +41,9 @@ class DataStream:
             del self._callbacks[engine_name]
         if engine_name in self.subscriptions:
             del self.subscriptions[engine_name]
+            
+        if engine_name in self.private_callbacks:
+            del self.private_callbacks[engine_name]
             
         # --- Garbage Collection untuk Orphaned Tasks ---
         needed_ticker_workers = set()
@@ -87,6 +92,30 @@ class DataStream:
             if self._running:
                 self._ensure_candle_worker(symbol, timeframe, is_futures)
 
+    def register_private_callback(self, engine_name: str, callback: Callable):
+        self.private_callbacks[engine_name] = callback
+        logger.info(f"DataStream: Private callback registered for '{engine_name}'")
+
+    def unregister_private_callback(self, engine_name: str):
+        if engine_name in self.private_callbacks:
+            del self.private_callbacks[engine_name]
+            logger.info(f"DataStream: Private callback unregistered for '{engine_name}'")
+
+    def _ensure_private_workers(self, is_futures: bool):
+        worker_type = "futures" if is_futures else "spot"
+        if worker_type not in self._active_private_workers:
+            logger.info(f"DataStream: Spawning {worker_type.upper()} private stream workers (orders & balance)")
+            
+            # Start order watcher
+            order_task = asyncio.create_task(self._watch_orders_loop(is_futures))
+            self._tasks[f"orders_{worker_type}"] = order_task
+            
+            # Start balance watcher
+            balance_task = asyncio.create_task(self._watch_balance_loop(is_futures))
+            self._tasks[f"balance_{worker_type}"] = balance_task
+            
+            self._active_private_workers.add(worker_type)
+
     def _ensure_ticker_worker(self, symbol: str, is_futures: bool):
         worker_key = f"{symbol}_{is_futures}"
         if worker_key not in self._active_ticker_workers:
@@ -125,6 +154,7 @@ class DataStream:
         self._tasks.clear()
         self._active_ticker_workers.clear()
         self._active_candle_workers.clear()
+        self._active_private_workers.clear()
         logger.info("DataStream WebSocket workers stopped.")
 
     async def _watch_ticker_loop(self, symbol: str, is_futures: bool):
@@ -223,4 +253,39 @@ class DataStream:
                 break
             except Exception as e:
                 logger.error(f"WS OHLCV Error ({symbol}): {e}")
+                await asyncio.sleep(5)
+
+    async def _watch_orders_loop(self, is_futures: bool):
+        client = kucoin_futures_client if is_futures else kucoin_client
+        while self._running:
+            try:
+                # CCXT watch_orders returns an array of incrementing order updates
+                orders = await client.exchange.watch_orders()
+                if not orders: continue
+                
+                for order in orders:
+                    # Broadcast to all registered private callbacks
+                    for eng_name, cb in list(self.private_callbacks.items()):
+                        # The Kernel-level router will handle filtering by symbol/engine
+                        asyncio.create_task(cb(order, 'order'))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"WS Private Orders Error ({'Futures' if is_futures else 'Spot'}): {e}")
+                await asyncio.sleep(5)
+
+    async def _watch_balance_loop(self, is_futures: bool):
+        client = kucoin_futures_client if is_futures else kucoin_client
+        while self._running:
+            try:
+                balance = await client.exchange.watch_balance()
+                if not balance: continue
+                
+                # Broadcast to all registered private callbacks
+                for eng_name, cb in list(self.private_callbacks.items()):
+                    asyncio.create_task(cb(balance, 'balance'))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"WS Private Balance Error ({'Futures' if is_futures else 'Spot'}): {e}")
                 await asyncio.sleep(5)

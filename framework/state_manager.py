@@ -110,6 +110,7 @@ class StateManager:
                     self.state[engine_name]['positions'][r.symbol] = {
                         'entry_price': r.entry_price, 'amount': r.amount, 'side': r.side,
                         'stop_loss': r.stop_loss, 'take_profit': r.take_profit,
+                        'sl_order_id': r.sl_order_id, 'tp_order_id': r.tp_order_id,
                         'max_pnl': r.max_pnl, 'min_pnl': r.min_pnl
                     }
                 
@@ -475,12 +476,14 @@ class StateManager:
                         if rec:
                             rec.amount = pos['amount']; rec.entry_price = pos['entry_price']
                             rec.stop_loss = pos.get('stop_loss', 0.0); rec.take_profit = pos.get('take_profit', 0.0)
+                            rec.sl_order_id = pos.get('sl_order_id'); rec.tp_order_id = pos.get('tp_order_id')
                             rec.max_pnl = pos.get('max_pnl', 0.0); rec.min_pnl = pos.get('min_pnl', 0.0)
                         else:
                             rec = ActivePosition(
                                 engine_name=eng_name, symbol=sym, side=side, mode=mode,
                                 amount=pos['amount'], entry_price=pos['entry_price'], 
-                                stop_loss=pos.get('stop_loss', 0.0), take_profit=pos.get('take_profit', 0.0)
+                                stop_loss=pos.get('stop_loss', 0.0), take_profit=pos.get('take_profit', 0.0),
+                                sl_order_id=pos.get('sl_order_id'), tp_order_id=pos.get('tp_order_id')
                             )
                             session.add(rec)
                         await session.commit()

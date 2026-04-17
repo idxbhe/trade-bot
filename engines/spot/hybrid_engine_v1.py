@@ -73,9 +73,19 @@ class HybridEngineV1(BaseEngine):
 
         pos = self.ctx.get_position(symbol)
         if pos:
-            # Immediate Stop Loss Check
+            # Check if this position has active exchange-side protection
+            has_exchange_sl = pos.get('sl_order_id') is not None
+            
+            # Local Stop Loss Check
             if price <= pos['stop_loss']:
-                self.ctx.report_status(symbol, "EXEC", f"STOP LOSS HIT @ ${price:,.2f}")
-                await self.ctx.close_position(symbol, price, "STOP_LOSS")
+                if has_exchange_sl:
+                    # Failsafe: Intervene locally ONLY if price is 1% past the SL (Exchange fail)
+                    if price <= pos['stop_loss'] * 0.99:
+                        self.ctx.report_status(symbol, "EXEC", f"CRITICAL FAILSAFE triggered @ ${price:,.2f}")
+                        await self.ctx.close_position(symbol, price, "STOP_LOSS")
+                else:
+                    # No exchange protection (TEST mode or API failure), execute locally
+                    self.ctx.report_status(symbol, "EXEC", f"STOP LOSS HIT @ ${price:,.2f}")
+                    await self.ctx.close_position(symbol, price, "STOP_LOSS")
             else:
                 self.ctx.report_status(symbol, "RISK", "Monitoring active position...")
