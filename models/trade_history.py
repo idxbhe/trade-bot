@@ -34,6 +34,7 @@ class ActivePosition(Base):
     take_profit = Column(Float)
     sl_order_id = Column(String, nullable=True)
     tp_order_id = Column(String, nullable=True)
+    closing_order_id = Column(String, nullable=True)
     max_pnl = Column(Float, default=0.0)
     min_pnl = Column(Float, default=0.0)
     created_at = Column(DateTime, server_default=func.now())

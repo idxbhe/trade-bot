@@ -360,6 +360,10 @@ class Kernel:
                 logger.error(f"[{engine_name}] Failed to close {symbol} via {ctx.market} API ({reason})")
                 return False
                 
+            # Capture Closing Order ID for strict matching in WebSocket handler
+            pos['closing_order_id'] = order.get('id')
+            self.state_manager.add_position(engine_name, symbol, pos, pos['side'])
+
             # Bersihkan proteksi di bursa jika penutupan dipicu oleh Sinyal/Manual (selain SL itu sendiri)
             if reason != 'STOP_LOSS':
                 await self._cancel_position_protection(engine_name, symbol)
@@ -367,7 +371,7 @@ class Kernel:
             if not actual_exit_price:
                 actual_exit_price = self.data_stream.latest_prices.get(symbol, exit_price)
 
-            logger.info(f"[{engine_name}] Position {symbol} close request sent. Reason: {reason}")
+            logger.info(f"[{engine_name}] Position {symbol} close order sent (ID: {pos['closing_order_id']}). Reason: {reason}")
             return True
                 
         if ctx.mode == 'TEST':
@@ -520,24 +524,24 @@ class Kernel:
                 order_type = 'PENDING'
                 break
             
-            # 2. Check Active Positions for SL/TP
-            pos = state.get('positions', {}).get(symbol)
-            if pos:
+            # 2. Check Active Positions for SL/TP or Closing
+            for sym, pos in state.get('positions', {}).items():
                 if order_id in [pos.get('sl_order_id'), pos.get('tp_order_id')]:
                     target_engine = name
+                    symbol = sym # Ensure we use the correct symbol from position state
                     order_type = 'PROTECTION'
                     break
                     
-                # 3. Check if it's a manual/signal closure (we don't track the ID explicitly yet, 
-                # but we can infer if the side is opposite to position side)
-                pos_side = pos.get('side') # LONG or SHORT
-                order_side = 'BUY' if order.get('side') == 'buy' else 'SELL'
-                if (pos_side == 'LONG' and order_side == 'SELL') or (pos_side == 'SHORT' and order_side == 'BUY'):
+                if order_id == pos.get('closing_order_id'):
                     target_engine = name
+                    symbol = sym # Ensure we use the correct symbol from position state
                     order_type = 'CLOSING'
                     break
+            
+            if target_engine: break
 
         if not target_engine:
+            # Silently ignore orders from other bots or manual user activity
             return
 
         if status == 'closed':
