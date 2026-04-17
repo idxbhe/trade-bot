@@ -35,6 +35,7 @@ class ActivePosition(Base):
     sl_order_id = Column(String, nullable=True)
     tp_order_id = Column(String, nullable=True)
     closing_order_id = Column(String, nullable=True)
+    status = Column(String, default='open') # Status: 'open', 'closing_in_progress'
     locked_margin = Column(Float, default=0.0)
     max_pnl = Column(Float, default=0.0)
     min_pnl = Column(Float, default=0.0)

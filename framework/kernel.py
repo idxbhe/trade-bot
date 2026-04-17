@@ -1,6 +1,7 @@
 import asyncio
 from typing import Dict, Any, Optional
 import time
+import ccxt
 from core.logger import logger
 from framework.state_manager import StateManager
 from framework.data_stream import DataStream
@@ -442,58 +443,109 @@ class Kernel:
         ctx = self.contexts.get(engine_name)
         if not ctx: return False
         
-        pos = self.state_manager.get_position(engine_name, symbol)
-        if not pos: return False
-        
-        actual_exit_price = exit_price
-        
-        if ctx.mode == 'LIVE':
-            ccxt_side = 'sell' if pos['side'] == 'LONG' else 'buy'
-            leverage = getattr(self.engines[engine_name], 'leverage', 1)
+        # Initialize symbol lock if not exists
+        if engine_name not in self.engine_symbol_locks:
+            self.engine_symbol_locks[engine_name] = {}
+        if symbol not in self.engine_symbol_locks[engine_name]:
+            self.engine_symbol_locks[engine_name][symbol] = asyncio.Lock()
             
-            # Emergency logic for Market Orders vs Smart Close
-            emergency_reasons = ['STOP_LOSS', 'MANUAL_CLOSE', 'CIRCUIT_BREAKER', 'DYNAMIC_EXIT']
+        async with self.engine_symbol_locks[engine_name][symbol]:
+            pos = self.state_manager.get_position(engine_name, symbol)
+            if not pos: return False
             
-            if reason in emergency_reasons:
-                if ctx.market.lower() == 'futures' and reason in ['STOP_LOSS', 'CIRCUIT_BREAKER']:
-                    # SMART EMERGENCY: Gunakan chunking IOC untuk Futures
-                    logger.warning(f"[{engine_name}] SMART Emergency exit triggered for {symbol} (Reason: {reason})")
-                    order = await self._execute_smart_emergency_close(
-                        engine_name, symbol, ccxt_side, pos['amount'], leverage
-                    )
-                    # WAP dari Smart Close digunakan sebagai harga exit aktual
-                    actual_exit_price = order.get('average')
-                else:
-                    # Standard Market Order untuk Spot atau penutupan Manual
-                    logger.warning(f"[{engine_name}] Emergency exit triggered for {symbol} (Reason: {reason}). Executing Market Order.")
-                    order = await order_manager.execute_market_order(
-                        symbol=symbol, side=ccxt_side, amount=pos['amount'],
-                        market=ctx.market, leverage=leverage, reduce_only=True
-                    )
-            else:
-                # Standard exit: Limit Order but with post_only=False to ensure execution
-                order = await order_manager.execute_limit_order(
-                    symbol=symbol, side=ccxt_side, amount=pos['amount'], price=exit_price,
-                    market=ctx.market, leverage=leverage, post_only=False, reduce_only=True
-                )
-            
-            if not order:
-                logger.error(f"[{engine_name}] Failed to close {symbol} via {ctx.market} API ({reason})")
+            # Step 1: State Guard
+            if pos.get('status') == 'closing_in_progress' and reason not in ['STOP_LOSS', 'CIRCUIT_BREAKER', 'MANUAL_CLOSE']:
+                logger.debug(f"[{engine_name}] Ignoring redundant close signal for {symbol} (Reason: {reason}) while closure is in progress.")
                 return False
-                
-            # Capture Closing Order ID for strict matching in WebSocket handler
-            pos['closing_order_id'] = order.get('id')
-            self.state_manager.add_position(engine_name, symbol, pos, pos['side'])
 
-            # Bersihkan proteksi di bursa jika penutupan dipicu oleh Sinyal/Manual (selain SL itu sendiri)
-            if reason != 'STOP_LOSS':
-                await self._cancel_position_protection(engine_name, symbol)
+            actual_exit_price = exit_price
             
-            if not actual_exit_price:
-                actual_exit_price = self.data_stream.latest_prices.get(symbol, exit_price)
+            if ctx.mode == 'LIVE':
+                # Step 2: Handle hanging closing orders (Cancel & Replace)
+                existing_close_id = pos.get('closing_order_id')
+                if existing_close_id:
+                    if reason in ['STOP_LOSS', 'CIRCUIT_BREAKER', 'MANUAL_CLOSE']:
+                        logger.warning(f"[{engine_name}] Emergency {reason} triggered. Cancelling existing closing order {existing_close_id}...")
+                        try:
+                            await order_manager.cancel_order(existing_close_id, symbol, ctx.market)
+                        except ccxt.NetworkError as e:
+                            logger.error(f"[{engine_name}] Network error cancelling close order: {e}. Aborting emergency close to prevent double execution.")
+                            return False
+                        except ccxt.OrderNotFound:
+                            pass # Order already closed or cancelled
+                        except Exception as e:
+                            logger.error(f"[{engine_name}] Unknown error cancelling close order: {e}")
+                            return False
+                        
+                        # Sync partial fill if any
+                        try:
+                            client = kucoin_futures_client if ctx.market.lower() == 'futures' else kucoin_client
+                            order_info = await client.exchange.fetch_order(existing_close_id, symbol)
+                            filled_amount = float(order_info.get('filled', 0.0))
+                            if filled_amount > 0:
+                                pos['amount'] -= filled_amount
+                                logger.info(f"[{engine_name}] Partial fill detected ({filled_amount}). Remaining amount: {pos['amount']}.")
+                            
+                            if pos['amount'] <= 0.000001:
+                                # Fully closed by previous order
+                                await self._finalize_position_close(engine_name, symbol, order_info.get('average', exit_price), reason)
+                                return True
+                        except Exception as e:
+                            logger.warning(f"[{engine_name}] Failed to verify partial fill for {existing_close_id}: {e}. Proceeding with caution.")
+                        
+                        pos['closing_order_id'] = None
+                    else:
+                        return False # Redundant signal ignored for non-emergency if order exists
 
-            logger.info(f"[{engine_name}] Position {symbol} close order sent (ID: {pos['closing_order_id']}). Reason: {reason}")
-            return True
+                # Step 3: Set locking status
+                pos['status'] = 'closing_in_progress'
+                self.state_manager.add_position(engine_name, symbol, pos, pos['side'])
+
+                ccxt_side = 'sell' if pos['side'] == 'LONG' else 'buy'
+                leverage = getattr(self.engines[engine_name], 'leverage', 1)
+                
+                # Emergency Logic
+                emergency_reasons = ['STOP_LOSS', 'MANUAL_CLOSE', 'CIRCUIT_BREAKER', 'DYNAMIC_EXIT']
+                
+                try:
+                    if reason in emergency_reasons:
+                        if ctx.market.lower() == 'futures' and reason in ['STOP_LOSS', 'CIRCUIT_BREAKER']:
+                            order = await self._execute_smart_emergency_close(
+                                engine_name, symbol, ccxt_side, pos['amount'], leverage
+                            )
+                            actual_exit_price = order.get('average')
+                        else:
+                            order = await order_manager.execute_market_order(
+                                symbol=symbol, side=ccxt_side, amount=pos['amount'],
+                                market=ctx.market, leverage=leverage, reduce_only=True
+                            )
+                    else:
+                        order = await order_manager.execute_limit_order(
+                            symbol=symbol, side=ccxt_side, amount=pos['amount'], price=exit_price,
+                            market=ctx.market, leverage=leverage, post_only=False, reduce_only=True
+                        )
+                    
+                    if not order or not order.get('id'):
+                        raise Exception("Failed to obtain valid order ID from exchange.")
+
+                    pos['closing_order_id'] = order.get('id')
+                    self.state_manager.add_position(engine_name, symbol, pos, pos['side'])
+
+                    if reason != 'STOP_LOSS':
+                        await self._cancel_position_protection(engine_name, symbol)
+                    
+                    if not actual_exit_price:
+                        actual_exit_price = self.data_stream.latest_prices.get(symbol, exit_price)
+
+                    logger.info(f"[{engine_name}] Position {symbol} close order sent (ID: {pos['closing_order_id']}). Reason: {reason}")
+                    return True
+
+                except Exception as e:
+                    logger.error(f"[{engine_name}] Execution error during close_position for {symbol}: {e}")
+                    # Step 4: Reset status on failure
+                    pos['status'] = 'open'
+                    self.state_manager.add_position(engine_name, symbol, pos, pos['side'])
+                    return False
                 
         if ctx.mode == 'TEST':
             # Simulator Realistis: Slippage & Spread untuk penutupan posisi
@@ -691,6 +743,14 @@ class Kernel:
             if order_type == 'PENDING':
                 order_info = self.state_manager.state[target_engine]['pending_orders'][order_id]
                 await self._handle_order_cancel(target_engine, order_id, order_info, status.upper())
+            elif order_type == 'CLOSING':
+                # Reset position status so bot can re-evaluate it
+                pos = self.state_manager.get_position(target_engine, symbol)
+                if pos and pos.get('closing_order_id') == order_id:
+                    logger.warning(f"[{target_engine}] Closing order {order_id} was {status.upper()}. Re-opening position state.")
+                    pos['status'] = 'open'
+                    pos['closing_order_id'] = None
+                    self.state_manager.add_position(target_engine, symbol, pos, pos['side'])
 
     async def _handle_private_balance_update(self, balance: dict):
         """Processes real-time balance updates to keep equity in sync."""

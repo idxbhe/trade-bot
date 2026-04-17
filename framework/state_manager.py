@@ -128,6 +128,7 @@ class StateManager:
                         'stop_loss': r.stop_loss, 'take_profit': r.take_profit,
                         'sl_order_id': r.sl_order_id, 'tp_order_id': r.tp_order_id,
                         'closing_order_id': r.closing_order_id,
+                        'status': r.status or 'open',
                         'locked_margin': r.locked_margin,
                         'max_pnl': r.max_pnl, 'min_pnl': r.min_pnl
                     }
@@ -549,6 +550,7 @@ class StateManager:
                             rec.stop_loss = pos.get('stop_loss', 0.0); rec.take_profit = pos.get('take_profit', 0.0)
                             rec.sl_order_id = pos.get('sl_order_id'); rec.tp_order_id = pos.get('tp_order_id')
                             rec.closing_order_id = pos.get('closing_order_id')
+                            rec.status = pos.get('status', 'open')
                             rec.locked_margin = pos.get('locked_margin', 0.0)
                             rec.max_pnl = pos.get('max_pnl', 0.0); rec.min_pnl = pos.get('min_pnl', 0.0)
                         else:
@@ -558,6 +560,7 @@ class StateManager:
                                 stop_loss=pos.get('stop_loss', 0.0), take_profit=pos.get('take_profit', 0.0),
                                 sl_order_id=pos.get('sl_order_id'), tp_order_id=pos.get('tp_order_id'),
                                 closing_order_id=pos.get('closing_order_id'),
+                                status=pos.get('status', 'open'),
                                 locked_margin=pos.get('locked_margin', 0.0)
                             )
                             session.add(rec)
