@@ -229,6 +229,27 @@ class StateManager:
     def get_position(self, engine_name: str, symbol: str) -> Optional[dict]:
         return self.state.get(engine_name, {}).get('positions', {}).get(symbol)
 
+    def track_position_extremes(self, engine_name: str, symbol: str, current_price: float):
+        """Track and update max/min floating PnL for an active position in memory."""
+        if engine_name not in self.state:
+            return
+        
+        pos = self.state[engine_name]['positions'].get(symbol)
+        if not pos:
+            return
+            
+        # Calculate floating PnL
+        if pos['side'] == 'LONG':
+            current_pnl = (current_price - pos['entry_price']) * pos['amount']
+        else: # SHORT
+            current_pnl = (pos['entry_price'] - current_price) * pos['amount']
+            
+        # Update extremes in memory (RAM only)
+        if current_pnl > pos.get('max_pnl', -float('inf')):
+            pos['max_pnl'] = current_pnl
+        if current_pnl < pos.get('min_pnl', float('inf')):
+            pos['min_pnl'] = current_pnl
+
     def get_all_positions(self, engine_name: str) -> Dict[str, dict]:
         return self.state.get(engine_name, {}).get('positions', {})
 

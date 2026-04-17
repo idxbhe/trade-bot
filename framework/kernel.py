@@ -115,6 +115,11 @@ class Kernel:
                 if current_phase == 'STANDBY':
                     return
 
+                if event_type == 'tick':
+                    last_price = data.get('last')
+                    if last_price:
+                        self.state_manager.track_position_extremes(engine_name, symbol, last_price)
+
                 if event_type == 'tick' and hasattr(engine_instance, 'on_tick'):
                     await engine_instance.on_tick(symbol, data)
                 elif event_type == 'candle' and hasattr(engine_instance, 'on_candle_closed'):
@@ -139,7 +144,10 @@ class Kernel:
             # PAUSE: We replace the event router with a no-op so strategy doesn't execute
             # But we DON'T unregister from DataStream yet, to keep floating PnL updating
             async def no_op_router(symbol: str, data: dict, event_type: str):
-                pass
+                if event_type == 'tick':
+                    last_price = data.get('last')
+                    if last_price:
+                        self.state_manager.track_position_extremes(engine_name, symbol, last_price)
                 
             ctx = self.contexts.get(engine_name)
             if ctx:
