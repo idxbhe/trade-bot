@@ -10,7 +10,7 @@ class OBIScalperEngine(BaseEngine):
     """
     def __init__(self):
         super().__init__("OBI_Futures_Scalper")
-        self.strategy = OrderBookImbalanceStrategy(imbalance_threshold=0.25)
+        self.strategy = OrderBookImbalanceStrategy(imbalance_threshold=0.75) # Entering at 75% depth imbalance
         self.symbols_to_monitor = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT']
         self.cached_data = {}
         

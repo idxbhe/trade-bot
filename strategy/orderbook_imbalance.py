@@ -12,6 +12,12 @@ class OrderBookImbalanceStrategy(BaseStrategy):
         super().__init__("OBI_Scalper")
         self.depth_levels = depth_levels
         self.imbalance_threshold = imbalance_threshold
+        
+        if self.imbalance_threshold < 0.5:
+             # A threshold below 0.5 would cause both BUY and SELL logic to overlap or be noisy.
+             # Standard OBI usage expects threshold > 0.5.
+             from core.logger import logger
+             logger.warning(f"OrderBookImbalanceStrategy: Threshold {imbalance_threshold} is below 0.5! This may lead to overlapping signals.")
 
     def generate_signal(self, df: pd.DataFrame, current_price: float) -> Dict[str, Any]:
         """
@@ -23,9 +29,18 @@ class OrderBookImbalanceStrategy(BaseStrategy):
 
     def evaluate_orderbook(self, orderbook: dict) -> Dict[str, Any]:
         """
-        Evaluates the ccxt orderbook structure.
-        orderbook['bids'] -> [[price, amount], ...]
-        orderbook['asks'] -> [[price, amount], ...]
+        Calculates the Order Book Imbalance (OBI) at the top levels.
+        
+        Formula: OBI = Total Bid Volume / (Total Bid Volume + Total Ask Volume)
+        - OBI near 1.0: Bullish (Bids dominate)
+        - OBI near 0.0: Bearish (Asks dominate)
+        - OBI near 0.5: Neutral
+        
+        Args:
+            orderbook (dict): Dict containing 'bids' and 'asks' lists [[price, amount], ...]
+            
+        Returns:
+            dict: Signal data containing 'signal', 'reason', and 'obi' score.
         """
         if not orderbook or 'bids' not in orderbook or 'asks' not in orderbook:
             return {'signal': 'HOLD', 'reason': 'Missing orderbook data', 'obi': 0.5}
