@@ -68,6 +68,15 @@ class Kernel:
         # 4. Load from DB (overwrites memory with saved values if exist, unless fresh)
         await self.state_manager.load_state_from_db(name)
         
+        # 5. Exchange State Reconciliation (LIVE mode only)
+        if mode == 'LIVE':
+            try:
+                await self._reconcile_exchange_state(name)
+            except Exception as e:
+                logger.error(f"Failed to reconcile state for '{name}': {e}. Aborting engine load to prevent data corruption.")
+                self.unload_engine(name)
+                raise e
+        
         # Subscribe to tickers for existing positions so UI gets live prices while in standby
         # We need to make sure the DataStream has registered the engine first
         self.data_stream.register_engine(name, lambda s, d, e: None, market.lower() == 'futures')
@@ -659,6 +668,67 @@ class Kernel:
         
         # We call the normal close_position but with 'STOP_LOSS' reason to avoid re-cancelling protection
         await self.close_position(engine_name, symbol, price, "STOP_LOSS")
+
+    async def _reconcile_exchange_state(self, engine_name: str):
+        """Source of Truth synchronization: Exchange -> Local."""
+        ctx = self.contexts.get(engine_name)
+        if not ctx: return
+        
+        logger.info(f"[{engine_name}] Initiating Exchange State Reconciliation (Source of Truth)...")
+        
+        # Determine client
+        if ctx.market.lower() == 'futures':
+            from exchange.kucoin import kucoin_futures_client as client
+        else:
+            from exchange.kucoin import kucoin_client as client
+            
+        exchange_positions = await client.fetch_active_positions()
+        local_positions = self.state_manager.get_all_positions(engine_name).copy()
+        
+        # Mapping for easier lookup
+        exch_map = {p['symbol']: p for p in exchange_positions}
+        
+        # Skenario A: ORPHANED (Exchange has it, Local doesn't)
+        for sym, exch_pos in exch_map.items():
+            if sym not in local_positions:
+                logger.warning(f"[{engine_name}] Orphaned position found on exchange for {sym}. Restoring to local state...")
+                pos_data = {
+                    'entry_price': exch_pos['entry_price'],
+                    'amount': exch_pos['amount'],
+                    'stop_loss': 0.0, # Default to zero, must be recalculated by strategy if needed
+                    'take_profit': 0.0,
+                    'max_pnl': 0.0,
+                    'min_pnl': 0.0
+                }
+                self.state_manager.add_position(engine_name, sym, pos_data, exch_pos['side'])
+                self.report_status(engine_name, sym, "SYNC", f"RECOVERED {exch_pos['side']} from Exchange.")
+
+        # Skenario B: PHANTOM (Local has it, Exchange doesn't)
+        for sym, local_pos in local_positions.items():
+            if sym not in exch_map:
+                logger.warning(f"[{engine_name}] Phantom position found in local state for {sym}. Closing locally...")
+                
+                # Fetch recent trades to find the actual exit price
+                exit_price = 0.0
+                try:
+                    trades = await client._safe_call(client.exchange.fetch_my_trades, sym, limit=5)
+                    if trades:
+                        # Find latest trade that closed the position
+                        opp_side = 'sell' if local_pos['side'] == 'LONG' else 'buy'
+                        closing_trades = [t for t in trades if t['side'] == opp_side]
+                        if closing_trades:
+                            exit_price = float(closing_trades[-1]['price'])
+                except:
+                    pass
+                
+                if exit_price == 0:
+                    ticker = await client.fetch_ticker(sym)
+                    exit_price = ticker['last'] if ticker else local_pos['entry_price']
+                
+                await self._finalize_position_close(engine_name, sym, exit_price, "EXCHANGE_SYNC_CLOSE")
+                self.report_status(engine_name, sym, "SYNC", "CLOSED (Sync with Exchange)")
+
+        logger.info(f"[{engine_name}] Reconciliation complete. State is now synchronized.")
 
 # Global singleton
 kernel = Kernel()

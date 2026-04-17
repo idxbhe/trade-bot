@@ -21,12 +21,27 @@ class StateManager:
 
     async def stop_sync_loop(self):
         if self._sync_task:
-            await self.db_queue.join()
-            self._sync_task.cancel()
+            logger.info("StateManager: Stopping DB Sync worker gracefully...")
             try:
-                await self._sync_task
-            except asyncio.CancelledError:
-                pass
+                # Wait for current queue to finish with timeout
+                await asyncio.wait_for(self.db_queue.join(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning("StateManager: Queue join timed out. Remaining tasks will be flushed.")
+            
+            # Signal worker to stop
+            self.db_queue.put_nowait(('STOP',))
+            
+            try:
+                # Wait for worker to finish its last task
+                await asyncio.wait_for(self._sync_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._sync_task.cancel()
+                try:
+                    await self._sync_task
+                except asyncio.CancelledError:
+                    pass
+            
+            self._sync_task = None
             logger.info("StateManager DB Sync worker stopped.")
 
     def initialize_engine_state(self, engine_name: str, initial_equity: float, mode: str, market: str):
@@ -428,6 +443,11 @@ class StateManager:
             try:
                 task = await self.db_queue.get()
                 action = task[0]
+                
+                if action == 'STOP':
+                    self.db_queue.task_done()
+                    break
+                    
                 async with async_session() as session:
                     if action == 'save_equity':
                         _, eng_name, eq, bl = task

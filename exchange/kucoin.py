@@ -82,6 +82,49 @@ class KuCoinClient:
             logger.error(f"Error fetching Spot balance: {e}")
         return 0.0
 
+    async def fetch_active_positions(self) -> list:
+        """
+        Spot Reconcile: Scan trade account for non-USDT assets.
+        Returns standardized list of positions.
+        """
+        try:
+            balance = await self._safe_call(self.exchange.fetch_balance, params={'type': 'trade'})
+            if not balance: return []
+            
+            positions = []
+            for asset, data in balance.items():
+                if asset in ['USDT', 'info', 'timestamp', 'datetime', 'free', 'used', 'total']:
+                    continue
+                
+                total = float(data.get('total', 0.0))
+                if total > 0.00000001: # Threshold to ignore dust
+                    symbol = f"{asset}/USDT"
+                    
+                    # Try to find entry price from last trade
+                    entry_price = 0.0
+                    trades = await self._safe_call(self.exchange.fetch_my_trades, symbol, limit=5)
+                    if trades:
+                        # Find latest BUY trade
+                        buy_trades = [t for t in trades if t['side'] == 'buy']
+                        if buy_trades:
+                            entry_price = float(buy_trades[-1]['price'])
+                    
+                    # Fallback to ticker if no trade found
+                    if entry_price == 0:
+                        ticker = await self.fetch_ticker(symbol)
+                        if ticker: entry_price = float(ticker['last'])
+
+                    positions.append({
+                        'symbol': symbol,
+                        'amount': total,
+                        'entry_price': entry_price,
+                        'side': 'LONG'
+                    })
+            return positions
+        except Exception as e:
+            logger.error(f"Error during Spot state reconciliation: {e}")
+            return []
+
     async def load_markets(self):
         if not self.exchange.markets:
             await self._safe_call(self.exchange.load_markets)
@@ -149,6 +192,27 @@ class KuCoinFuturesClient(KuCoinClient):
             # Fallback jika dictionary info gagal diurai oleh CCXT
             return float(balance['USDT'].get('free', 0.0)) + float(balance['USDT'].get('used', 0.0))
         return 0.0
+
+    async def fetch_active_positions(self) -> list:
+        """Futures Reconcile: Calls fetch_positions and returns standardized list."""
+        try:
+            raw_positions = await self._safe_call(self.exchange.fetch_positions)
+            if not raw_positions: return []
+            
+            positions = []
+            for p in raw_positions:
+                amount = abs(float(p.get('contracts', 0.0)))
+                if amount > 0:
+                    positions.append({
+                        'symbol': p.get('symbol'),
+                        'amount': amount,
+                        'entry_price': float(p.get('entryPrice', 0.0)),
+                        'side': p.get('side', '').upper() # 'LONG' or 'SHORT'
+                    })
+            return positions
+        except Exception as e:
+            logger.error(f"Error during Futures state reconciliation: {e}")
+            return []
 
 kucoin_client = KuCoinClient()
 kucoin_futures_client = KuCoinFuturesClient()
