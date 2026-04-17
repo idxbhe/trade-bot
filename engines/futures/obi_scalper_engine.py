@@ -26,6 +26,7 @@ class OBIScalperEngine(BaseEngine):
         self.ctx.log(f"Starting OBI Scalper ({self.leverage}x lev)...", "INFO")
         for sym in self.symbols_to_monitor:
             self.ctx.subscribe_ticker(sym)
+            self.ctx.subscribe_orderbook(sym)
 
     async def on_tick(self, symbol: str, ticker: dict):
         if symbol not in self.symbols_to_monitor: return
@@ -36,6 +37,7 @@ class OBIScalperEngine(BaseEngine):
         
         if pos:
             self.ctx.report_status(symbol, "RISK", "Monitoring Futures Pos...")
+            # (SL/TP checks remain same)
             if pos['side'] == 'LONG':
                 if price >= pos.get('take_profit', float('inf')):
                     self.ctx.report_status(symbol, "EXEC", f"LONG TP HIT @ ${price:,.2f}")
@@ -52,36 +54,32 @@ class OBIScalperEngine(BaseEngine):
                     await self.ctx.close_position(symbol, price, "STOP_LOSS")
             return
             
-        # Throttled REST order book fetch to prevent API ban (WS fallback)
-        now = time.time()
-        if symbol not in self.cached_data or (now - self.cached_data[symbol].get('last_update', 0)) > 1.5:
-            self.ctx.report_status(symbol, "DATA", "Fetching OrderBook...")
-            try:
-                ob = await self.ctx.get_order_book(symbol, limit=20)
-                if ob:
-                    self.ctx.report_status(symbol, "ANALYZE", "Calculating OBI...")
-                    signal = self.strategy.evaluate_orderbook(ob)
-                    self.cached_data[symbol] = {'signal': signal, 'last_update': now}
+        # Get OrderBook from local Cache (High-frequency WebSocket Data)
+        ob = self.ctx.data_stream.get_orderbook(symbol)
+        if not ob:
+            # Skip if WebSocket hasn't delivered the first snapshot yet
+            return
+
+        self.ctx.report_status(symbol, "ANALYZE", "Calculating OBI...")
+        signal = self.strategy.evaluate_orderbook(ob)
+        
+        sig = signal['signal']
+        if sig in ['BUY', 'SELL']:
+            self.ctx.report_status(symbol, "RISK", "Checking Margin Risk...")
+            current_eq = self.ctx.get_equity()
+            baseline = self.ctx.get_baseline('daily')
+            
+            if not self.circuit_breaker.is_tripped(current_eq, baseline):
+                side = 'LONG' if sig == 'BUY' else 'SHORT'
+                trade_value = current_eq * self.risk_per_trade_pct * self.leverage
+                size = trade_value / price
+                
+                if size > 0:
+                    sl = price * (1 - self.sl_pct) if side == 'LONG' else price * (1 + self.sl_pct)
+                    tp = price * (1 + self.tp_pct) if side == 'LONG' else price * (1 - self.tp_pct)
                     
-                    sig = signal['signal']
-                    if sig in ['BUY', 'SELL']:
-                        self.ctx.report_status(symbol, "RISK", "Checking Margin Risk...")
-                        current_eq = self.ctx.get_equity()
-                        baseline = self.ctx.get_baseline('daily')
-                        
-                        if not self.circuit_breaker.is_tripped(current_eq, baseline):
-                            side = 'LONG' if sig == 'BUY' else 'SHORT'
-                            trade_value = current_eq * self.risk_per_trade_pct * self.leverage
-                            size = trade_value / price
-                            
-                            if size > 0:
-                                sl = price * (1 - self.sl_pct) if side == 'LONG' else price * (1 + self.sl_pct)
-                                tp = price * (1 + self.tp_pct) if side == 'LONG' else price * (1 - self.tp_pct)
-                                
-                                self.ctx.report_status(symbol, "EXEC", f"EXEC {side} {size:.4f}x @ ${price:,.2f}")
-                                if side == 'LONG':
-                                    await self.ctx.buy_limit(symbol, size, price, sl=sl, tp=tp)
-                                else:
-                                    await self.ctx.sell_limit(symbol, size, price, sl=sl, tp=tp)
-            except Exception as e:
-                pass
+                    self.ctx.report_status(symbol, "EXEC", f"EXEC {side} {size:.4f}x @ ${price:,.2f}")
+                    if side == 'LONG':
+                        await self.ctx.buy_limit(symbol, size, price, sl=sl, tp=tp)
+                    else:
+                        await self.ctx.sell_limit(symbol, size, price, sl=sl, tp=tp)

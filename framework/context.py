@@ -22,6 +22,10 @@ class TradingContext:
         """Ask the kernel to push candle updates to this engine via on_candle_closed()."""
         self._kernel.subscribe_candles(self.engine_name, symbol, timeframe)
 
+    def subscribe_orderbook(self, symbol: str):
+        """Request WebSocket orderbook streaming for this symbol."""
+        self._kernel.subscribe_orderbook(self.engine_name, symbol)
+
     async def get_historical_data(self, symbol: str, timeframe: str = '1m', limit: int = 200) -> pd.DataFrame:
         """Pull historical data synchronously for initialization or heavy analysis."""
         return await self._kernel.get_historical_data(symbol, timeframe, limit)

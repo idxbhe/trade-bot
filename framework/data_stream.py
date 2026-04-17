@@ -25,16 +25,18 @@ class DataStream:
         # Track active workers to prevent duplicates
         self._active_ticker_workers: Set[str] = set() # "symbol_futures"
         self._active_candle_workers: Set[str] = set() # "symbol_timeframe_futures"
+        self._active_orderbook_workers: Set[str] = set() # "symbol_futures"
         self._active_private_workers: Set[str] = set() # "spot", "futures"
         
         # Track last candle timestamps: symbol_timeframe -> last_timestamp
         self._last_candle_ts: Dict[str, int] = {}
         self._ohlcv_cache: Dict[str, pd.DataFrame] = {}
+        self._orderbook_cache: Dict[str, dict] = {}
 
     def register_engine(self, engine_name: str, callback: Callable, is_futures: bool = False):
         self._callbacks[engine_name] = callback
         if engine_name not in self.subscriptions:
-            self.subscriptions[engine_name] = {'tickers': set(), 'candles': {}, 'is_futures': is_futures}
+            self.subscriptions[engine_name] = {'tickers': set(), 'candles': {}, 'orderbooks': set(), 'is_futures': is_futures}
 
     def unregister_engine(self, engine_name: str):
         if engine_name in self._callbacks:
@@ -64,13 +66,20 @@ class DataStream:
                 self._active_ticker_workers.remove(worker_key)
                 logger.info(f"DataStream: Cancelled orphaned ticker worker {worker_key}")
                 
-        for worker_key in list(self._active_candle_workers):
-            if worker_key not in needed_candle_workers:
+        for worker_key in list(self._active_orderbook_workers):
+            needed = False
+            for subs in self.subscriptions.values():
+                is_fut = subs['is_futures']
+                for sym in subs['orderbooks']:
+                    if f"{sym}_{is_fut}" == worker_key:
+                        needed = True
+                        break
+            if not needed:
                 if worker_key in self._tasks:
                     self._tasks[worker_key].cancel()
                     del self._tasks[worker_key]
-                self._active_candle_workers.remove(worker_key)
-                logger.info(f"DataStream: Cancelled orphaned candle worker {worker_key}")
+                self._active_orderbook_workers.remove(worker_key)
+                logger.info(f"DataStream: Cancelled orphaned orderbook worker {worker_key}")
                 
         logger.info(f"DataStream: Engine '{engine_name}' unregistered.")
 
@@ -91,6 +100,18 @@ class DataStream:
             
             if self._running:
                 self._ensure_candle_worker(symbol, timeframe, is_futures)
+
+    def subscribe_orderbook(self, engine_name: str, symbol: str):
+        if engine_name in self.subscriptions:
+            self.subscriptions[engine_name]['orderbooks'].add(symbol)
+            is_futures = self.subscriptions[engine_name]['is_futures']
+            logger.info(f"DataStream: Engine '{engine_name}' subscribed to orderbook {symbol}")
+            
+            if self._running:
+                self._ensure_orderbook_worker(symbol, is_futures)
+
+    def get_orderbook(self, symbol: str) -> dict | None:
+        return self._orderbook_cache.get(symbol)
 
     def register_private_callback(self, engine_name: str, callback: Callable):
         self.private_callbacks[engine_name] = callback
@@ -132,6 +153,26 @@ class DataStream:
             self._tasks[worker_key] = task
             self._active_candle_workers.add(worker_key)
 
+    def _ensure_orderbook_worker(self, symbol: str, is_futures: bool):
+        worker_key = f"ob_{symbol}_{is_futures}"
+        if worker_key not in self._active_orderbook_workers:
+            logger.info(f"DataStream: Spawning dynamic orderbook worker for {symbol} (Futures: {is_futures})")
+            task = asyncio.create_task(self._watch_orderbook_loop(symbol, is_futures))
+            self._tasks[worker_key] = task
+            self._active_orderbook_workers.add(worker_key)
+
+    async def _watch_orderbook_loop(self, symbol: str, is_futures: bool, limit: int = 20):
+        client = kucoin_futures_client if is_futures else kucoin_client
+        while self._running:
+            try:
+                ob = await client.exchange.watch_order_book(symbol, limit)
+                self._orderbook_cache[symbol] = ob
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"WS OrderBook Error ({symbol}): {e}")
+                await asyncio.sleep(5)
+
     async def start(self):
         if self._running:
             return
@@ -144,6 +185,8 @@ class DataStream:
                 self._ensure_ticker_worker(sym, is_futures)
             for sym, tf in subs['candles'].items():
                 self._ensure_candle_worker(sym, tf, is_futures)
+            for sym in subs['orderbooks']:
+                self._ensure_orderbook_worker(sym, is_futures)
                 
         logger.info("DataStream WebSocket workers started.")
 

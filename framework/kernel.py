@@ -198,6 +198,9 @@ class Kernel:
     def subscribe_candles(self, engine_name: str, symbol: str, timeframe: str):
         self.data_stream.subscribe_candles(engine_name, symbol, timeframe)
 
+    def subscribe_orderbook(self, engine_name: str, symbol: str):
+        self.data_stream.subscribe_orderbook(engine_name, symbol)
+
     async def get_historical_data(self, symbol: str, timeframe: str, limit: int):
         return await market_collector.get_historical_data(symbol, timeframe, limit)
 
