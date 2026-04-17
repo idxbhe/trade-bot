@@ -237,17 +237,31 @@ class Kernel:
         # Update Memory State Instantly (Hanya untuk TEST mode)
         current_eq = self.state_manager.get_equity(engine_name)
         
-        # EQUITY LOGIC: Spot vs Futures
+        # 1. Simulator Realistis: Slippage & Spread
+        best_bid = self.data_stream.latest_bids.get(symbol)
+        best_ask = self.data_stream.latest_asks.get(symbol)
+        slippage_rate = 0.001 # 0.1% statis
+        fee_rate = 0.001 # 0.1% trading fee
+        
+        if side == 'BUY':
+            base_price = best_ask if best_ask else price
+            simulated_price = base_price * (1 + slippage_rate)
+        else: # SELL
+            base_price = best_bid if best_bid else price
+            simulated_price = base_price * (1 - slippage_rate)
+            
+        # 2. EQUITY LOGIC: Spot vs Futures
         if ctx.market.lower() == 'futures':
             # Futures: Margin is part of equity, we only track PnL on close
             pass
         else:
-            # Spot: Subtract full cost from cash balance
-            cost = price * amount
-            self.state_manager.update_equity(engine_name, current_eq - cost)
+            # Spot: Subtract full cost + entry fee from cash balance
+            cost = simulated_price * amount
+            fee_cost = cost * fee_rate
+            self.state_manager.update_equity(engine_name, current_eq - (cost + fee_cost))
         
         pos_data = {
-            'entry_price': price,
+            'entry_price': simulated_price,
             'amount': amount,
             'stop_loss': sl,
             'take_profit': tp,
@@ -258,7 +272,7 @@ class Kernel:
         self.state_manager.add_position(engine_name, symbol, pos_data, pos_side)
         
         # Log execution
-        self.report_status(engine_name, symbol, "EXEC", f"OPEN {pos_side} {amount:.4f} @ ${price:,.2f}")
+        self.report_status(engine_name, symbol, "EXEC", f"OPEN {pos_side} {amount:.4f} @ ${simulated_price:,.2f} (Incl. Slippage)")
         
         return True
 
@@ -339,6 +353,22 @@ class Kernel:
             logger.info(f"[{engine_name}] Position {symbol} close request sent. Reason: {reason}")
             return True
                 
+        if ctx.mode == 'TEST':
+            # Simulator Realistis: Slippage & Spread untuk penutupan posisi
+            best_bid = self.data_stream.latest_bids.get(symbol)
+            best_ask = self.data_stream.latest_asks.get(symbol)
+            slippage_rate = 0.001 # 0.1% statis
+            
+            if pos['side'] == 'LONG': # Closing LONG = SELL action
+                base_price = best_bid if best_bid else exit_price
+                actual_exit_price = base_price * (1 - slippage_rate)
+            else: # Closing SHORT = BUY action
+                base_price = best_ask if best_ask else exit_price
+                actual_exit_price = base_price * (1 + slippage_rate)
+                
+            logger.info(f"[{engine_name}] Position {symbol} closed (TEST). Actual Exit: ${actual_exit_price:,.2f} (Incl. Slippage)")
+            return await self._finalize_position_close(engine_name, symbol, actual_exit_price, reason)
+                
         return await self._finalize_position_close(engine_name, symbol, actual_exit_price, reason)
 
     async def _finalize_position_close(self, engine_name: str, symbol: str, exit_price: float, reason: str) -> bool:
@@ -355,16 +385,28 @@ class Kernel:
         
         # PnL Calculation (simulate 0.1% fee)
         fee_rate = 0.001
-        simulated_fees = (pos['entry_price'] * pos['amount'] * fee_rate) + (exit_price * pos['amount'] * fee_rate)
+        
+        # Accurate Fee Logic: 
+        # Untuk SPOT TEST, entry fee sudah dipotong di equity saat place_order, 
+        # maka di sini hanya hitung exit fee untuk update equity penutupan.
+        # Untuk FUTURES atau LIVE, kita hitung total biaya (entry + exit).
+        if ctx.mode == 'TEST' and ctx.market.lower() != 'futures':
+            simulated_fees = (exit_price * pos['amount'] * fee_rate)
+            gross_pnl_fees = (pos['entry_price'] * pos['amount'] * fee_rate) + simulated_fees
+        else:
+            simulated_fees = (pos['entry_price'] * pos['amount'] * fee_rate) + (exit_price * pos['amount'] * fee_rate)
+            gross_pnl_fees = simulated_fees
         
         if pos['side'] == 'LONG':
-            pnl = (exit_price - pos['entry_price']) * pos['amount'] - simulated_fees
+            pnl = (exit_price - pos['entry_price']) * pos['amount'] - gross_pnl_fees
         else:
-            pnl = (pos['entry_price'] - exit_price) * pos['amount'] - simulated_fees
+            pnl = (pos['entry_price'] - exit_price) * pos['amount'] - gross_pnl_fees
 
         if ctx.market.lower() == 'futures':
+            # PnL di Futures sudah termasuk pengurangan semua fee
             self.state_manager.update_equity(engine_name, current_eq + pnl)
         else:
+            # Spot: Revenue dikurangi biaya penutupan (biaya pembukaan sudah dipotong sebelumnya)
             self.state_manager.update_equity(engine_name, current_eq + revenue - simulated_fees)
             
         # Aggregate Stats Fast
