@@ -12,6 +12,7 @@ class TradingContext:
         self.engine_name = engine_name
         self.mode = mode
         self.market = market
+        self.data_stream = kernel.data_stream
 
     # --- Data Subscriptions ---
     def subscribe_ticker(self, symbol: str):

@@ -116,26 +116,30 @@ class Kernel:
                 if current_phase in ['STANDBY', 'BOOTING', 'SYNCING']:
                     return
 
-                if event_type == 'tick':
-                    last_price = data.get('last')
-                    if last_price:
-                        self.state_manager.track_position_extremes(engine_name, symbol, last_price)
+                try:
+                    if event_type == 'tick':
+                        last_price = data.get('last')
+                        if last_price:
+                            self.state_manager.track_position_extremes(engine_name, symbol, last_price)
 
-                if event_type == 'tick' and hasattr(engine_instance, 'on_tick'):
-                    await engine_instance.on_tick(symbol, data)
-                elif event_type == 'candle' and hasattr(engine_instance, 'on_candle_closed'):
-                    # JIT Conversion: Deque -> DataFrame
-                    timeframe = data.get('timeframe')
-                    tracker_key = f"{symbol}_{timeframe}"
-                    raw_buffer = self.data_stream.ohlcv_buffer.get(tracker_key)
-                    
-                    if raw_buffer:
-                        import pandas as pd
-                        # list(raw_buffer) triggers a snapshot of the deque at this moment
-                        df = pd.DataFrame(list(raw_buffer), columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                        df.set_index('timestamp', inplace=True)
-                        await engine_instance.on_candle_closed(symbol, df)
+                    if event_type == 'tick' and hasattr(engine_instance, 'on_tick'):
+                        await engine_instance.on_tick(symbol, data)
+                    elif event_type == 'candle' and hasattr(engine_instance, 'on_candle_closed'):
+                        # JIT Conversion: Deque -> DataFrame
+                        timeframe = data.get('timeframe')
+                        tracker_key = f"{symbol}_{timeframe}"
+                        raw_buffer = self.data_stream.ohlcv_buffer.get(tracker_key)
+                        
+                        if raw_buffer:
+                            import pandas as pd
+                            # list(raw_buffer) triggers a snapshot of the deque at this moment
+                            df = pd.DataFrame(list(raw_buffer), columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                            df.set_index('timestamp', inplace=True)
+                            await engine_instance.on_candle_closed(symbol, df)
+                except Exception as e:
+                    logger.error(f"Error in engine '{engine_name}' during '{event_type}' on {symbol}: {e}")
+                    self.report_status(engine_name, symbol, "ERROR", f"Logic Error: {str(e)[:40]}")
                 
         is_futures = ctx.market.lower() == 'futures'
         self.data_stream.register_engine(engine_name, event_router, is_futures)
