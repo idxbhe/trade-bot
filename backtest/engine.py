@@ -33,56 +33,74 @@ class BacktestEngine:
         """
         Iterates through historical data row-by-row to simulate trading.
         Note: In a real tick-level backtester, we would use smaller timeframes.
-        This is a simplified bar-by-bar backtester.
+        This version fixes Look-Ahead bias by executing signals on the NEXT candle's open.
         """
         logger.info(f"Starting Backtest for Strategy: {strategy.name}")
         logger.info(f"Initial Capital: ${self.initial_capital:,.2f}")
         
+        pending_signal = None
+        pending_signal_data = None
+        
         for index, row in df.iterrows():
-            current_price = row['close']
+            current_close = row['close']
+            open_price = row['open']
             
-            # 1. Check existing positions for Stop Loss or Take Profit
-            for pos in self.positions[:]: # Iterate copy to allow removal
-                if pos['type'] == 'LONG':
-                    if current_price <= pos['stop_loss']:
-                        self._close_position(pos, current_price, index, 'STOP_LOSS')
-                    elif 'target_exit' in pos and current_price >= pos['target_exit']:
-                        self._close_position(pos, current_price, index, 'TAKE_PROFIT')
-            
-            # 2. Generate Signal from Strategy
-            # In backtesting, we feed the data up to the current row to prevent look-ahead bias
-            historical_slice = df.loc[:index] 
-            signal_data = strategy.generate_signal(historical_slice, current_price)
-            
-            # 3. Execute Signal
-            if signal_data['signal'] == 'BUY' and not self.positions:
-                # Calculate size using Risk Management
-                atr = row.get('atr_14', 0)
-                sl_price = position_sizer.calculate_stop_loss(current_price, atr, is_long=True)
-                
-                size, risk_usd = position_sizer.calculate_position_size(self.current_capital, current_price, sl_price)
-                
-                if size > 0:
-                    executed_price = self._apply_slippage_and_fee(current_price, is_buy=True, amount=size)
-                    total_cost = executed_price * size
+            # 1. Execution Phase (Execute signal from PREVIOUS candle at CURRENT open)
+            if pending_signal:
+                if pending_signal == 'BUY' and not self.positions:
+                    # Calculate size using Risk Management based on OPEN price
+                    atr = row.get('atr_14', 0)
+                    sl_price = position_sizer.calculate_stop_loss(open_price, atr, is_long=True)
                     
-                    if total_cost <= self.current_capital:
-                        self.current_capital -= total_cost
+                    size, risk_usd = position_sizer.calculate_position_size(self.current_capital, open_price, sl_price)
+                    
+                    if size > 0:
+                        executed_price = self._apply_slippage_and_fee(open_price, is_buy=True, amount=size)
+                        total_cost = executed_price * size
                         
-                        new_pos = {
-                            'entry_time': index,
-                            'entry_price': executed_price,
-                            'amount': size,
-                            'type': 'LONG',
-                            'stop_loss': sl_price,
-                            'target_exit': signal_data.get('target_exit')
-                        }
-                        self.positions.append(new_pos)
-                        logger.debug(f"[{index}] BUY Executed @ ${executed_price:.2f} | Size: {size:.4f} | SL: ${sl_price:.2f}")
+                        if total_cost <= self.current_capital:
+                            self.current_capital -= total_cost
+                            
+                            new_pos = {
+                                'entry_time': index,
+                                'entry_price': executed_price,
+                                'amount': size,
+                                'type': 'LONG',
+                                'stop_loss': sl_price,
+                                'target_exit': pending_signal_data.get('target_exit')
+                            }
+                            self.positions.append(new_pos)
+                            logger.debug(f"[{index}] BUY Executed @ ${executed_price:.2f} | Size: {size:.4f} | SL: ${sl_price:.2f}")
 
-            elif signal_data['signal'] == 'EXIT_LONG' and self.positions:
-                 for pos in self.positions[:]:
-                     self._close_position(pos, current_price, index, 'SIGNAL_EXIT')
+                elif pending_signal == 'EXIT_LONG' and self.positions:
+                     for pos in self.positions[:]:
+                         self._close_position(pos, open_price, index, 'SIGNAL_EXIT')
+                
+                # Reset state after execution phase
+                pending_signal = None
+                pending_signal_data = None
+
+            # 2. Check existing positions for Stop Loss or Take Profit (Realism using High/Low)
+            for pos in self.positions[:]: 
+                if pos['type'] == 'LONG':
+                    # Stop Loss: Check if Low touched or passed SL
+                    if row['low'] <= pos['stop_loss']:
+                        # Execute at exact stop loss price for realism
+                        self._close_position(pos, pos['stop_loss'], index, 'STOP_LOSS')
+                    # Take Profit: Check if High touched or passed Target
+                    elif 'target_exit' in pos and row['high'] >= pos['target_exit']:
+                        # Execute at exact target price
+                        self._close_position(pos, pos['target_exit'], index, 'TAKE_PROFIT')
+            
+            # 3. Generate Signal for NEXT candle
+            # We feed data up to current index (current candle has just finished closing)
+            historical_slice = df.loc[:index] 
+            signal_data = strategy.generate_signal(historical_slice, current_close)
+            
+            # Store signal to be executed at the beginning of the next iteration
+            if signal_data['signal'] in ['BUY', 'EXIT_LONG']:
+                pending_signal = signal_data['signal']
+                pending_signal_data = signal_data
 
     def _close_position(self, pos: Dict[str, Any], current_price: float, exit_time, reason: str):
         """Closes an open position and updates capital and history."""
