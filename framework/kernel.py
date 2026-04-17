@@ -111,9 +111,9 @@ class Kernel:
                 self.engine_symbol_locks[engine_name][symbol] = asyncio.Lock()
                 
             async with self.engine_symbol_locks[engine_name][symbol]:
-                # Mencegah eksekusi antrean (backlog) jika engine baru saja dihentikan
+                # Mencegah eksekusi antrean (backlog) jika engine baru saja dihentikan atau sedang sinkronisasi
                 current_phase = self.state_manager.state.get(engine_name, {}).get('ui', {}).get('phase')
-                if current_phase == 'STANDBY':
+                if current_phase in ['STANDBY', 'BOOTING', 'SYNCING']:
                     return
 
                 if event_type == 'tick':
@@ -678,6 +678,8 @@ class Kernel:
             await self._handle_private_order_update(data)
         elif event_type == 'balance':
             await self._handle_private_balance_update(data)
+        elif event_type == 'reconnect_sync':
+            asyncio.create_task(self._run_sequential_reconciliation())
 
     async def _handle_private_order_update(self, order: dict):
         """Processes real-time order status updates from CCXT Pro."""
@@ -865,7 +867,24 @@ class Kernel:
         logger.info(f"[{engine_name}] Protection trigger confirmed for {symbol} @ ${price:,.2f}")
         
         # We call the normal close_position but with 'STOP_LOSS' reason to avoid re-cancelling protection
-        await self.close_position(engine_name, symbol, price, "STOP_LOSS")
+        await self.close_position(engine_name, symbol, price, "STOP_LOSS")    async def _run_sequential_reconciliation(self):
+        """Sequential REST reconciliation for all LIVE engines to prevent Rate Limit Ban."""
+        for name, state in self.state_manager.state.items():
+            ctx = self.contexts.get(name)
+            if ctx and ctx.mode == 'LIVE':
+                try:
+                    logger.warning(f"[{name}] Halting engine execution for forced REST reconciliation...")
+                    original_phase = state.get('ui', {}).get('phase', 'IDLE')
+                    self.state_manager.state[name]['ui']['phase'] = 'SYNCING'
+                    
+                    await self._reconcile_exchange_state(name)
+                    
+                    self.state_manager.state[name]['ui']['phase'] = original_phase
+                    await asyncio.sleep(1.0) # Jeda antar engine agar API Rate Limit bernapas
+                except Exception as e:
+                    logger.error(f"[{name}] Forced REST reconciliation failed: {e}")
+                    self.state_manager.state[name]['ui']['phase'] = original_phase
+
 
     async def _reconcile_exchange_state(self, engine_name: str):
         """Atomic Reconciliation 2-Arah: Exchange <-> Local State."""

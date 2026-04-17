@@ -18,6 +18,7 @@ class DataStream:
         self.latest_prices: Dict[str, float] = {}
         self.latest_bids: Dict[str, float] = {}
         self.latest_asks: Dict[str, float] = {}
+        self.last_sync_time = 0.0
         
         # Active asyncio tasks for streaming mapping (worker_key -> Task)
         self._tasks: Dict[str, asyncio.Task] = {}
@@ -322,8 +323,21 @@ class DataStream:
 
     async def _watch_orders_loop(self, is_futures: bool):
         client = kucoin_futures_client if is_futures else kucoin_client
+        needs_sync = False
+        import time
         while self._running:
             try:
+                if needs_sync:
+                    current_time = time.time()
+                    if current_time - self.last_sync_time > 15.0:  # Cooldown 15 detik
+                        logger.info(f"DataStream: WS {'Futures' if is_futures else 'Spot'} reconnected. Triggering REST reconciliation.")
+                        self.last_sync_time = current_time
+                        for eng_name, cb in list(self.private_callbacks.items()):
+                            asyncio.create_task(cb({}, 'reconnect_sync'))
+                    else:
+                        logger.info("DataStream: WS reconnected, but sync ignored due to cooldown.")
+                    needs_sync = False
+
                 # CCXT watch_orders returns an array of incrementing order updates
                 orders = await client.exchange.watch_orders()
                 if not orders: continue
@@ -337,6 +351,7 @@ class DataStream:
                 break
             except Exception as e:
                 logger.error(f"WS Private Orders Error ({'Futures' if is_futures else 'Spot'}): {e}")
+                needs_sync = True
                 await asyncio.sleep(5)
 
     async def _watch_balance_loop(self, is_futures: bool):
