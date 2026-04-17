@@ -1,4 +1,5 @@
 from typing import Dict, Any, Optional
+from decimal import Decimal
 from core.logger import logger
 from exchange.kucoin import kucoin_client, kucoin_futures_client
 
@@ -31,13 +32,13 @@ class OrderManager:
             limits = await client.get_market_limits(symbol)
             if limits and 'limits' in limits:
                 min_amount = limits['limits'].get('amount', {}).get('min', 0)
-                if float(formatted_amount) < min_amount:
+                if Decimal(str(formatted_amount)) < Decimal(str(min_amount)):
                     logger.warning(f"Order amount {formatted_amount} is below minimum {min_amount} for {symbol}. Order rejected.")
                     return None
                     
                 if not is_futures:
                     min_cost = limits['limits'].get('cost', {}).get('min', 0)
-                    if (float(formatted_amount) * float(formatted_price)) < min_cost:
+                    if (Decimal(str(formatted_amount)) * Decimal(str(formatted_price))) < Decimal(str(min_cost)):
                         logger.warning(f"Order cost is below minimum {min_cost} for {symbol}. Order rejected.")
                         return None
 
@@ -85,7 +86,7 @@ class OrderManager:
             limits = await client.get_market_limits(symbol)
             if limits and 'limits' in limits:
                 min_amount = limits['limits'].get('amount', {}).get('min', 0)
-                if float(formatted_amount) < min_amount:
+                if Decimal(str(formatted_amount)) < Decimal(str(min_amount)):
                     logger.warning(f"Market order amount {formatted_amount} is below minimum {min_amount} for {symbol}. Order rejected.")
                     return None
 
