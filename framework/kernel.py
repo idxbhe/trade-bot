@@ -867,7 +867,9 @@ class Kernel:
         logger.info(f"[{engine_name}] Protection trigger confirmed for {symbol} @ ${price:,.2f}")
         
         # We call the normal close_position but with 'STOP_LOSS' reason to avoid re-cancelling protection
-        await self.close_position(engine_name, symbol, price, "STOP_LOSS")    async def _run_sequential_reconciliation(self):
+        await self.close_position(engine_name, symbol, price, "STOP_LOSS")
+
+    async def _run_sequential_reconciliation(self):
         """Sequential REST reconciliation for all LIVE engines to prevent Rate Limit Ban."""
         for name, state in self.state_manager.state.items():
             ctx = self.contexts.get(name)
