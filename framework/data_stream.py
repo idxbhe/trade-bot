@@ -187,6 +187,7 @@ class DataStream:
     async def _watch_ohlcv_loop(self, symbol: str, timeframe: str, is_futures: bool):
         client = kucoin_futures_client if is_futures else kucoin_client
         tracker_key = f"{symbol}_{timeframe}"
+        needs_backfill = False
         
         # 1. Warm-up Cache (One-time REST call to populate historical data)
         if tracker_key not in self._ohlcv_cache:
@@ -203,6 +204,25 @@ class DataStream:
         
         while self._running:
             try:
+                # REST Backfill Mechanism: Sync cache if reconnection occurred
+                if needs_backfill:
+                    try:
+                        logger.info(f"DataStream: [Backfill] Re-syncing OHLVC cache for {symbol} {timeframe}")
+                        ohlcv = await client.exchange.fetch_ohlcv(symbol, timeframe, limit=200)
+                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                        df.set_index('timestamp', inplace=True)
+                        
+                        self._ohlcv_cache[tracker_key] = df
+                        # Reset timestamp tracker to ensure the next WS tick primes correctly without duplication
+                        if tracker_key in self._last_candle_ts:
+                            del self._last_candle_ts[tracker_key]
+                        needs_backfill = False # Successfully backfilled
+                    except Exception as e:
+                        logger.error(f"DataStream: [Backfill] Failed to resync {symbol}: {e}. Retrying...")
+                        await asyncio.sleep(5)
+                        continue # Retry backfill before starting watch loop
+
                 # CCXT watch_ohlcv returns the full candle list cached in memory
                 candles = await client.exchange.watch_ohlcv(symbol, timeframe)
                 if not candles or len(candles) < 2: continue
@@ -234,6 +254,7 @@ class DataStream:
                                              
                         # Append and maintain a rolling window of 200 bars
                         df = pd.concat([df, new_row])
+                        df = df[~df.index.duplicated(keep='last')]
                         if len(df) > 200:
                             df = df.iloc[-200:]
                         
@@ -253,6 +274,7 @@ class DataStream:
                 break
             except Exception as e:
                 logger.error(f"WS OHLCV Error ({symbol}): {e}")
+                needs_backfill = True # Trigger backfill on reconnection
                 await asyncio.sleep(5)
 
     async def _watch_orders_loop(self, is_futures: bool):
