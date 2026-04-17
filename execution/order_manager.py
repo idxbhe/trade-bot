@@ -1,4 +1,5 @@
 from typing import Dict, Any, Optional
+import time
 from decimal import Decimal
 from core.logger import logger
 from exchange.kucoin import kucoin_client, kucoin_futures_client
@@ -11,7 +12,7 @@ class OrderManager:
     def __init__(self):
         pass
 
-    async def execute_limit_order(self, symbol: str, side: str, amount: float, price: float, market: str, leverage: int = 1, post_only: bool = True, reduce_only: bool = False) -> Optional[Dict[str, Any]]:
+    async def execute_limit_order(self, engine_name: str, symbol: str, side: str, amount: float, price: float, market: str, leverage: int = 1, post_only: bool = True, reduce_only: bool = False) -> Optional[Dict[str, Any]]:
         """
         Executes a Limit Order on KuCoin Spot or Futures.
         Validates minimum amounts and formats precision before sending.
@@ -42,7 +43,9 @@ class OrderManager:
                         logger.warning(f"Order cost is below minimum {min_cost} for {symbol}. Order rejected.")
                         return None
 
-            params = {}
+            params = {
+                'clientOid': f"{engine_name.replace('_', '')}{int(time.time()*1000)}"
+            }
             if post_only:
                 params['postOnly'] = True
 

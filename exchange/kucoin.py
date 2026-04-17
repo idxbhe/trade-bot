@@ -67,6 +67,12 @@ class KuCoinClient:
     async def fetch_ohlcv(self, symbol: str, timeframe: str = '15m', limit: int = 100):
         return await self._safe_call(self.exchange.fetch_ohlcv, symbol, timeframe, limit=limit)
 
+    async def fetch_open_orders(self, symbol: str = None):
+        return await self._safe_call(self.exchange.fetch_open_orders, symbol)
+
+    async def fetch_order(self, order_id: str, symbol: str):
+        return await self._safe_call(self.exchange.fetch_order, order_id, symbol)
+
     async def fetch_balance(self) -> float:
         """Fetch available USDT balance from Trade account."""
         try:

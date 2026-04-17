@@ -238,7 +238,7 @@ class Kernel:
             leverage = getattr(self.engines[engine_name], 'leverage', 1)
             
             order = await order_manager.execute_limit_order(
-                symbol=symbol, side=ccxt_side, amount=amount, price=price,
+                engine_name=engine_name, symbol=symbol, side=ccxt_side, amount=amount, price=price,
                 market=ctx.market, leverage=leverage, post_only=post_only
             )
             if not order: return False
@@ -667,6 +667,11 @@ class Kernel:
         if not target_engine:
             # Silently ignore orders from other bots or manual user activity
             return
+            
+        # Ignore updates during BOOTING phase to prevent race conditions during reconciliation
+        if self.state_manager.state[target_engine]['ui']['phase'] == 'BOOTING':
+            # logger.debug(f"[{target_engine}] Ignoring WebSocket update for order {order_id} during BOOTING phase.")
+            return
 
         if status == 'closed':
             logger.info(f"[{target_engine}] Order FILLED real-time: {symbol} (Type: {order_type}, ID: {order_id})")
@@ -806,65 +811,103 @@ class Kernel:
         await self.close_position(engine_name, symbol, price, "STOP_LOSS")
 
     async def _reconcile_exchange_state(self, engine_name: str):
-        """Source of Truth synchronization: Exchange -> Local."""
+        """Atomic Reconciliation 2-Arah: Exchange <-> Local State."""
         ctx = self.contexts.get(engine_name)
         if not ctx: return
         
-        logger.info(f"[{engine_name}] Initiating Exchange State Reconciliation (Source of Truth)...")
+        # 1. Set Phase to BOOTING to hold WebSocket updates
+        prev_phase = self.state_manager.state[engine_name]['ui']['phase']
+        self.state_manager.state[engine_name]['ui']['phase'] = 'BOOTING'
+        self.report_status(engine_name, "SYSTEM", "BOOTING", "Reconciling orders...")
         
-        # Determine client
-        if ctx.market.lower() == 'futures':
-            from exchange.kucoin import kucoin_futures_client as client
-        else:
-            from exchange.kucoin import kucoin_client as client
+        try:
+            # Determine client
+            if ctx.market.lower() == 'futures':
+                from exchange.kucoin import kucoin_futures_client as client
+            else:
+                from exchange.kucoin import kucoin_client as client
             
-        exchange_positions = await client.fetch_active_positions()
-        local_positions = self.state_manager.get_all_positions(engine_name).copy()
-        
-        # Mapping for easier lookup
-        exch_map = {p['symbol']: p for p in exchange_positions}
-        
-        # Skenario A: ORPHANED (Exchange has it, Local doesn't)
-        for sym, exch_pos in exch_map.items():
-            if sym not in local_positions:
-                logger.warning(f"[{engine_name}] Orphaned position found on exchange for {sym}. Restoring to local state...")
-                pos_data = {
-                    'entry_price': exch_pos['entry_price'],
-                    'amount': exch_pos['amount'],
-                    'stop_loss': 0.0, # Default to zero, must be recalculated by strategy if needed
-                    'take_profit': 0.0,
-                    'max_pnl': 0.0,
-                    'min_pnl': 0.0
-                }
-                self.state_manager.add_position(engine_name, sym, pos_data, exch_pos['side'])
-                self.report_status(engine_name, sym, "SYNC", f"RECOVERED {exch_pos['side']} from Exchange.")
+            # 2. Fetch all open orders from exchange
+            exchange_open = await client.fetch_open_orders()
+            if exchange_open is None: exchange_open = []
+            
+            # 3. Filter orders belonging to this bot using clientOrderId (isolated)
+            bot_tag = engine_name.replace('_', '').lower()
+            filtered_exchange = []
+            for order in exchange_open:
+                # CCXT maps clientOid to 'clientOrderId' in many unified responses
+                client_id = order.get('clientOrderId', '').lower()
+                if bot_tag in client_id:
+                    filtered_exchange.append(order)
+            
+            exch_ids = {o['id'] for o in filtered_exchange}
+            local_pending = self.state_manager.state[engine_name].get('pending_orders', {}).copy()
+            
+            # Skenario C: Orphaned Exchange Order (In Exchange, Not in Local)
+            for exch_order in filtered_exchange:
+                oid = exch_order['id']
+                if oid not in local_pending:
+                    logger.warning(f"[{engine_name}] Orphaned order found (ID: {oid}). Cancelling...")
+                    await order_manager.cancel_order(oid, exch_order['symbol'], ctx.market)
+                    self.report_status(engine_name, exch_order['symbol'], "SYNC", f"Cancelled Orphaned Order {oid}")
 
-        # Skenario B: PHANTOM (Local has it, Exchange doesn't)
-        for sym, local_pos in local_positions.items():
-            if sym not in exch_map:
-                logger.warning(f"[{engine_name}] Phantom position found in local state for {sym}. Closing locally...")
-                
-                # Fetch recent trades to find the actual exit price
-                exit_price = 0.0
-                try:
-                    trades = await client._safe_call(client.exchange.fetch_my_trades, sym, limit=5)
-                    if trades:
-                        # Find latest trade that closed the position
-                        opp_side = 'sell' if local_pos['side'] == 'LONG' else 'buy'
-                        closing_trades = [t for t in trades if t['side'] == opp_side]
-                        if closing_trades:
-                            exit_price = float(closing_trades[-1]['price'])
-                except:
-                    pass
-                
-                if exit_price == 0:
-                    ticker = await client.fetch_ticker(sym)
-                    exit_price = ticker['last'] if ticker else local_pos['entry_price']
-                
-                await self._finalize_position_close(engine_name, sym, exit_price, "EXCHANGE_SYNC_CLOSE")
-                self.report_status(engine_name, sym, "SYNC", "CLOSED (Sync with Exchange)")
+            # Skenario D: Phantom Local Pending (In Local, Not in Exchange)
+            for pending_id, order_data in local_pending.items():
+                if pending_id not in exch_ids:
+                    logger.warning(f"[{engine_name}] Phantom pending order {pending_id} found locally. Checking final status...")
+                    
+                    final_order = await client.fetch_order(pending_id, order_data['symbol'])
+                    if final_order:
+                        status = final_order.get('status')
+                        if status == 'closed':
+                            logger.info(f"[{engine_name}] Phantom order {pending_id} was actually FILLED. Finalizing...")
+                            await self._handle_order_fill(engine_name, pending_id, order_data, final_order)
+                        elif status in ['canceled', 'cancelled', 'expired', 'rejected']:
+                            logger.info(f"[{engine_name}] Phantom order {pending_id} was {status.upper()}. Removing...")
+                            self.state_manager.remove_pending_order(engine_name, pending_id)
+                    else:
+                        # If fetch_order fails/returns None, it might be too old or invalid. 
+                        # To be safe, we remove it from local to stop phantom tracking.
+                        logger.error(f"[{engine_name}] Could not verify final status for {pending_id}. Removing from local state.")
+                        self.state_manager.remove_pending_order(engine_name, pending_id)
 
-        logger.info(f"[{engine_name}] Reconciliation complete. State is now synchronized.")
+            # 4. Standard Position Sync (Scenario A & B)
+            exchange_positions = await client.fetch_active_positions()
+            local_positions = self.state_manager.get_all_positions(engine_name).copy()
+            exch_map = {p['symbol']: p for p in exchange_positions}
+            
+            for sym, exch_pos in exch_map.items():
+                if sym not in local_positions:
+                    logger.warning(f"[{engine_name}] Orphaned position found for {sym}. Restoring...")
+                    pos_data = {
+                        'entry_price': exch_pos['entry_price'], 'amount': exch_pos['amount'],
+                        'stop_loss': 0.0, 'take_profit': 0.0, 'max_pnl': 0.0, 'min_pnl': 0.0
+                    }
+                    self.state_manager.add_position(engine_name, sym, pos_data, exch_pos['side'])
+
+            for sym, local_pos in local_positions.items():
+                if sym not in exch_map:
+                    logger.warning(f"[{engine_name}] Phantom position found for {sym}. Closing locally...")
+                    exit_price = 0.0
+                    try:
+                        trades = await client._safe_call(client.exchange.fetch_my_trades, sym, limit=5)
+                        if trades:
+                            opp_side = 'sell' if local_pos['side'] == 'LONG' else 'buy'
+                            closing_trades = [t for t in trades if t['side'] == opp_side]
+                            if closing_trades: exit_price = float(closing_trades[-1]['price'])
+                    except: pass
+                    if exit_price == 0:
+                        ticker = await client.fetch_ticker(sym)
+                        exit_price = ticker['last'] if ticker else local_pos['entry_price']
+                    await self._finalize_position_close(engine_name, sym, exit_price, "EXCHANGE_SYNC_CLOSE")
+
+        except Exception as e:
+            logger.error(f"[{engine_name}] Reconciliation Error: {e}")
+            raise e
+        finally:
+            # Restore Phase
+            self.state_manager.state[engine_name]['ui']['phase'] = prev_phase if prev_phase != 'BOOTING' else 'IDLE'
+            logger.info(f"[{engine_name}] Atomic Reconciliation complete.")
 
 # Global singleton
 kernel = Kernel()

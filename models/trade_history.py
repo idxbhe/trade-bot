@@ -57,4 +57,18 @@ class EquityBaseline(Base):
     last_reset_yearly = Column(DateTime)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+class PendingOrder(Base):
+    __tablename__ = "pending_orders"
 
+    id = Column(Integer, primary_key=True, index=True)
+    engine_name = Column(String, index=True)
+    mode = Column(String, index=True)
+    order_id = Column(String, unique=True, index=True)
+    symbol = Column(String)
+    side = Column(String)
+    amount = Column(Float)
+    price = Column(Float)
+    sl = Column(Float)
+    tp = Column(Float)
+    time = Column(Float)
+    created_at = Column(DateTime, server_default=func.now())

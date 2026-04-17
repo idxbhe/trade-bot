@@ -108,7 +108,7 @@ class StateManager:
     async def load_state_from_db(self, engine_name: str):
         try:
             from core.database import async_session
-            from models.trade_history import ActivePosition, EquityBaseline, TradeHistory
+            from models.trade_history import ActivePosition, EquityBaseline, TradeHistory, PendingOrder
             from sqlalchemy.future import select
             from sqlalchemy import func
             
@@ -130,6 +130,19 @@ class StateManager:
                         'closing_order_id': r.closing_order_id,
                         'locked_margin': r.locked_margin,
                         'max_pnl': r.max_pnl, 'min_pnl': r.min_pnl
+                    }
+                
+                # Pending Orders: Filter by engine AND mode
+                stmt = select(PendingOrder).where(
+                    PendingOrder.engine_name == engine_name,
+                    PendingOrder.mode == mode
+                )
+                result = await session.execute(stmt)
+                records = result.scalars().all()
+                for r in records:
+                    self.state[engine_name]['pending_orders'][r.order_id] = {
+                        'symbol': r.symbol, 'side': r.side, 'amount': r.amount,
+                        'price': r.price, 'sl': r.sl, 'tp': r.tp, 'time': r.time
                     }
                 
                 # Baselines: Filter by engine AND mode
@@ -272,14 +285,15 @@ class StateManager:
             self.state[engine_name]['positions'][symbol] = pos_data
             self.reconcile_margin(engine_name)
             self.db_queue.put_nowait(('save_position', engine_name, symbol, pos_data, side))
-
     def add_pending_order(self, engine_name: str, order_id: str, order_data: dict):
         if engine_name in self.state:
             self.state[engine_name]['pending_orders'][order_id] = order_data
+            self.db_queue.put_nowait(('save_pending_order', engine_name, order_id, order_data))
 
     def remove_pending_order(self, engine_name: str, order_id: str):
         if engine_name in self.state and order_id in self.state[engine_name]['pending_orders']:
             del self.state[engine_name]['pending_orders'][order_id]
+            self.db_queue.put_nowait(('delete_pending_order', engine_name, order_id))
 
     def remove_position(self, engine_name: str, symbol: str):
         if engine_name in self.state and symbol in self.state[engine_name]['positions']:
@@ -473,7 +487,7 @@ class StateManager:
 
     async def _db_sync_worker(self):
         from core.database import async_session
-        from models.trade_history import TradeHistory, ActivePosition, EquityBaseline
+        from models.trade_history import TradeHistory, ActivePosition, EquityBaseline, PendingOrder
         from sqlalchemy.future import select
         from sqlalchemy import delete
         while True:
@@ -584,6 +598,45 @@ class StateManager:
                         )
                         await session.execute(stmt)
                         await session.commit()
+
+                    elif action == 'save_pending_order':
+                        _, eng_name, order_id, order_data = task
+                        mode = self.state[eng_name]['mode'] if eng_name in self.state else 'TEST'
+                        
+                        stmt = select(PendingOrder).where(
+                            PendingOrder.order_id == order_id
+                        )
+                        res = await session.execute(stmt)
+                        rec = res.scalars().first()
+                        if rec:
+                            rec.symbol = order_data['symbol']
+                            rec.side = order_data['side']
+                            rec.amount = order_data['amount']
+                            rec.price = order_data['price']
+                            rec.sl = order_data.get('sl', 0.0)
+                            rec.tp = order_data.get('tp', 0.0)
+                            rec.time = order_data.get('time', time.time())
+                        else:
+                            rec = PendingOrder(
+                                engine_name=eng_name, mode=mode, order_id=order_id,
+                                symbol=order_data['symbol'], side=order_data['side'],
+                                amount=order_data['amount'], price=order_data['price'],
+                                sl=order_data.get('sl', 0.0), tp=order_data.get('tp', 0.0),
+                                time=order_data.get('time', time.time())
+                            )
+                            session.add(rec)
+                        await session.commit()
+
+                    elif action == 'delete_pending_order':
+                        _, eng_name, order_id = task
+                        stmt = select(PendingOrder).where(
+                            PendingOrder.order_id == order_id
+                        )
+                        res = await session.execute(stmt)
+                        rec = res.scalars().first()
+                        if rec:
+                            await session.delete(rec)
+                            await session.commit()
                 self.db_queue.task_done()
             except asyncio.CancelledError: break
             except Exception as e:
