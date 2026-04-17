@@ -37,6 +37,7 @@ class StateManager:
                 'mode': mode,
                 'market': market,
                 'positions': {},
+                'pending_orders': {},
                 'baselines': {
                     'daily': initial_equity,
                     'weekly': initial_equity,
@@ -221,6 +222,14 @@ class StateManager:
             self.state[engine_name]['positions'][symbol] = pos_data
             self.db_queue.put_nowait(('save_position', engine_name, symbol, pos_data, side))
 
+    def add_pending_order(self, engine_name: str, order_id: str, order_data: dict):
+        if engine_name in self.state:
+            self.state[engine_name]['pending_orders'][order_id] = order_data
+
+    def remove_pending_order(self, engine_name: str, order_id: str):
+        if engine_name in self.state and order_id in self.state[engine_name]['pending_orders']:
+            del self.state[engine_name]['pending_orders'][order_id]
+
     def remove_position(self, engine_name: str, symbol: str):
         if engine_name in self.state and symbol in self.state[engine_name]['positions']:
             del self.state[engine_name]['positions'][symbol]
@@ -389,6 +398,7 @@ class StateManager:
             'trade_count': s['stats']['trade_count'], 
             'win_rate': s['stats']['win_rate'],
             'active_pos_count': len(s['positions']),
+            'pending_order_count': len(s['pending_orders']),
             'mode': s['mode'],
             'current_phase': s['ui']['phase'], 
             'status_message': s['ui']['message'], 

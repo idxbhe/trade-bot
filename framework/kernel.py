@@ -21,11 +21,16 @@ class Kernel:
         self.engines = {} # active engine instances
         self.contexts = {} # engine_name -> TradingContext
         self.engine_symbol_locks = {} # engine_name -> {symbol: asyncio.Lock()}
+        self._pending_tracker_task = None
 
     async def start(self):
-        """Start background services (DB syncing, Data Streaming)."""
+        """Start background services (DB syncing, Data Streaming, Order Tracking)."""
         self.state_manager.start_sync_loop()
         await self.data_stream.start()
+        
+        if not self._pending_tracker_task:
+            self._pending_tracker_task = asyncio.create_task(self._watch_pending_orders())
+            
         logger.info("Framework Kernel started.")
 
     async def stop(self):
@@ -33,6 +38,15 @@ class Kernel:
         for eng in self.engines.values():
             if hasattr(eng, 'shutdown'):
                 await eng.shutdown()
+        
+        if self._pending_tracker_task:
+            self._pending_tracker_task.cancel()
+            try:
+                await self._pending_tracker_task
+            except asyncio.CancelledError:
+                pass
+            self._pending_tracker_task = None
+
         await self.data_stream.stop()
         await self.state_manager.stop_sync_loop()
         logger.info("Framework Kernel stopped.")
@@ -216,8 +230,19 @@ class Kernel:
                 market=ctx.market, leverage=leverage, post_only=post_only
             )
             if not order: return False
+            
+            # PENDING ORDER LOGIC: Simpan sebagai pending, jangan langsung buka posisi
+            order_id = order.get('id')
+            self.state_manager.add_pending_order(engine_name, order_id, {
+                'symbol': symbol, 'side': side, 'amount': amount, 'price': price,
+                'sl': sl, 'tp': tp, 'time': time.time()
+            })
+            
+            # Log pending status
+            self.report_status(engine_name, symbol, "EXEC", f"PENDING {side} {amount:.4f} @ ${price:,.2f} (ID: {order_id})")
+            return True
                 
-        # Update Memory State Instantly
+        # Update Memory State Instantly (Hanya untuk TEST mode)
         current_eq = self.state_manager.get_equity(engine_name)
         
         # EQUITY LOGIC: Spot vs Futures
@@ -413,6 +438,103 @@ class Kernel:
     def reset_engine_balance(self, engine_name: str, initial_equity: float):
         """Reset the test balance back to the initial starting equity."""
         self.state_manager.reset_balance(engine_name, initial_equity)
+
+    # --- Private Background Tasks ---
+
+    async def _watch_pending_orders(self):
+        """Background task to poll status of pending orders from the exchange."""
+        logger.info("Background Order Tracker started.")
+        while True:
+            try:
+                # Ambil snapshot engine names untuk menghindari RuntimeError: dictionary changed size
+                engine_names = list(self.state_manager.state.keys())
+                for engine_name in engine_names:
+                    s = self.state_manager.state.get(engine_name)
+                    if not s: continue
+                    
+                    pending = s.get('pending_orders', {})
+                    if not pending: continue
+                        
+                    ctx = self.contexts.get(engine_name)
+                    if not ctx or ctx.mode != 'LIVE': continue
+                    
+                    is_futures = ctx.market.lower() == 'futures'
+                    client = kucoin_futures_client if is_futures else kucoin_client
+                    
+                    # Ambil snapshot order IDs
+                    order_ids = list(pending.keys())
+                    for order_id in order_ids:
+                        # Re-verify existence because it might have been removed in this loop
+                        if order_id not in pending: continue
+                        
+                        try:
+                            order_info = pending[order_id]
+                            symbol = order_info['symbol']
+                            
+                            # Poll status from exchange
+                            order = await client.exchange.fetch_order(order_id, symbol)
+                            status = order.get('status')
+                            
+                            if status == 'closed':
+                                await self._handle_order_fill(engine_name, order_id, order_info, order)
+                            elif status in ['canceled', 'cancelled', 'expired', 'rejected']:
+                                await self._handle_order_cancel(engine_name, order_id, order_info, status.upper())
+                            
+                            # Jeda singkat antar pesanan untuk menghindari rate limit
+                            await asyncio.sleep(0.5) 
+                        except Exception as e:
+                            logger.error(f"Error fetching status for order {order_id}: {e}")
+                            
+                await asyncio.sleep(2) 
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Global Order Tracker Error: {e}")
+                await asyncio.sleep(5)
+
+    async def _handle_order_fill(self, engine_name: str, order_id: str, order_info: dict, exchange_order: dict):
+        """Finalize order execution once it is confirmed FILLED by the exchange."""
+        symbol = order_info['symbol']
+        side = order_info['side']
+        amount = order_info['amount']
+        sl = order_info['sl']
+        tp = order_info['tp']
+        
+        # Resolve actual execution price
+        price = exchange_order.get('average') or exchange_order.get('price') or order_info['price']
+        
+        ctx = self.contexts.get(engine_name)
+        if not ctx: return
+
+        # EQUITY LOGIC: Spot vs Futures
+        if ctx.market.lower() != 'futures':
+            current_eq = self.state_manager.get_equity(engine_name)
+            cost = price * amount
+            self.state_manager.update_equity(engine_name, current_eq - cost)
+            
+        pos_data = {
+            'entry_price': price,
+            'amount': amount,
+            'stop_loss': sl,
+            'take_profit': tp,
+            'max_pnl': 0.0,
+            'min_pnl': 0.0
+        }
+        pos_side = 'LONG' if side == 'BUY' else 'SHORT'
+        
+        # UI & Memory swap
+        self.state_manager.remove_pending_order(engine_name, order_id)
+        self.state_manager.add_position(engine_name, symbol, pos_data, pos_side)
+        
+        self.report_status(engine_name, symbol, "SYNC", f"FILLED {pos_side} {amount:.4f} @ ${price:,.2f}")
+        logger.info(f"[{engine_name}] Order {order_id} filled. Position active for {symbol}.")
+
+    async def _handle_order_cancel(self, engine_name: str, order_id: str, order_info: dict, status: str):
+        """Cleanup pending order if it was canceled on the exchange."""
+        symbol = order_info['symbol']
+        self.state_manager.remove_pending_order(engine_name, order_id)
+        self.report_status(engine_name, symbol, "SYNC", f"Order {status}")
+        logger.warning(f"[{engine_name}] Pending order {order_id} for {symbol} was {status}.")
 
 # Global singleton
 kernel = Kernel()
