@@ -1,6 +1,7 @@
 import asyncio
 import pandas as pd
 from typing import Dict, Set, Callable
+from collections import deque
 from core.logger import logger
 from exchange.kucoin import kucoin_client, kucoin_futures_client
 
@@ -31,7 +32,7 @@ class DataStream:
         
         # Track last candle timestamps: symbol_timeframe -> last_timestamp
         self._last_candle_ts: Dict[str, int] = {}
-        self._ohlcv_cache: Dict[str, pd.DataFrame] = {}
+        self.ohlcv_buffer: Dict[str, deque] = {} # Format: {symbol_tf: deque(maxlen=200)}
         self._orderbook_cache: Dict[str, dict] = {}
 
     def register_engine(self, engine_name: str, callback: Callable, is_futures: bool = False):
@@ -233,39 +234,33 @@ class DataStream:
         tracker_key = f"{symbol}_{timeframe}"
         needs_backfill = False
         
-        # 1. Warm-up Cache (One-time REST call to populate historical data)
-        if tracker_key not in self._ohlcv_cache:
+        # 1. Warm-up Buffer (One-time REST call to populate historical data)
+        if tracker_key not in self.ohlcv_buffer:
             try:
-                logger.info(f"DataStream: Warming up OHLCV cache for {symbol} {timeframe}")
+                logger.info(f"DataStream: Warming up OHLCV buffer for {symbol} {timeframe}")
                 ohlcv = await client.exchange.fetch_ohlcv(symbol, timeframe, limit=200)
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df.set_index('timestamp', inplace=True)
-                self._ohlcv_cache[tracker_key] = df
+                # Store as list in deque for O(1) appending
+                self.ohlcv_buffer[tracker_key] = deque(ohlcv, maxlen=200)
             except Exception as e:
-                logger.error(f"DataStream: Failed to warm up cache for {symbol}: {e}")
-                # We continue anyway, the first tick will attempt to fill it or the next loop will retry
+                logger.error(f"DataStream: Failed to warm up buffer for {symbol}: {e}")
         
         while self._running:
             try:
-                # REST Backfill Mechanism: Sync cache if reconnection occurred
+                # REST Backfill Mechanism: Sync buffer if reconnection occurred
                 if needs_backfill:
                     try:
-                        logger.info(f"DataStream: [Backfill] Re-syncing OHLVC cache for {symbol} {timeframe}")
+                        logger.info(f"DataStream: [Backfill] Re-syncing OHLVC buffer for {symbol} {timeframe}")
                         ohlcv = await client.exchange.fetch_ohlcv(symbol, timeframe, limit=200)
-                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                        df.set_index('timestamp', inplace=True)
+                        self.ohlcv_buffer[tracker_key] = deque(ohlcv, maxlen=200)
                         
-                        self._ohlcv_cache[tracker_key] = df
-                        # Reset timestamp tracker to ensure the next WS tick primes correctly without duplication
+                        # Reset timestamp tracker
                         if tracker_key in self._last_candle_ts:
                             del self._last_candle_ts[tracker_key]
-                        needs_backfill = False # Successfully backfilled
+                        needs_backfill = False 
                     except Exception as e:
                         logger.error(f"DataStream: [Backfill] Failed to resync {symbol}: {e}. Retrying...")
                         await asyncio.sleep(5)
-                        continue # Retry backfill before starting watch loop
+                        continue 
 
                 # CCXT watch_ohlcv returns the full candle list cached in memory
                 candles = await client.exchange.watch_ohlcv(symbol, timeframe)
@@ -282,35 +277,17 @@ class DataStream:
                     # The finalized candle data is now at the second-to-last position
                     closed_candle_raw = candles[-2]
                     
-                    # 2. Update In-Memory Cache (Event-based, Zero REST calls)
-                    if tracker_key in self._ohlcv_cache:
-                        df = self._ohlcv_cache[tracker_key]
-                        
-                        # Create a new row with proper datetime index
-                        new_ts = pd.to_datetime(closed_candle_raw[0], unit='ms')
-                        new_row = pd.DataFrame([{
-                            'open': float(closed_candle_raw[1]),
-                            'high': float(closed_candle_raw[2]),
-                            'low': float(closed_candle_raw[3]),
-                            'close': float(closed_candle_raw[4]),
-                            'volume': float(closed_candle_raw[5])
-                        }], index=[new_ts])
-                                             
-                        # Append and maintain a rolling window of 200 bars
-                        df = pd.concat([df, new_row])
-                        df = df[~df.index.duplicated(keep='last')]
-                        if len(df) > 200:
-                            df = df.iloc[-200:]
-                        
-                        self._ohlcv_cache[tracker_key] = df
+                    # 2. Update In-Memory Buffer (Event-based, Zero REST calls)
+                    if tracker_key in self.ohlcv_buffer:
+                        self.ohlcv_buffer[tracker_key].append(closed_candle_raw)
                         
                         # 3. Synchronously push to all subscribed engines
                         for eng_name, subs in self.subscriptions.items():
                             if subs['is_futures'] == is_futures and subs['candles'].get(symbol) == timeframe:
                                 cb = self._callbacks.get(eng_name)
                                 if cb:
-                                    # Send a copy to prevent engines from mutating shared cache
-                                    asyncio.create_task(cb(symbol, df.copy(), 'candle'))
+                                    # Passing timeframe info so Kernel can perform JIT conversion
+                                    asyncio.create_task(cb(symbol, {'timeframe': timeframe}, 'candle'))
                 
                 self._last_candle_ts[tracker_key] = timestamp
                 

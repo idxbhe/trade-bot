@@ -124,7 +124,18 @@ class Kernel:
                 if event_type == 'tick' and hasattr(engine_instance, 'on_tick'):
                     await engine_instance.on_tick(symbol, data)
                 elif event_type == 'candle' and hasattr(engine_instance, 'on_candle_closed'):
-                    await engine_instance.on_candle_closed(symbol, data)
+                    # JIT Conversion: Deque -> DataFrame
+                    timeframe = data.get('timeframe')
+                    tracker_key = f"{symbol}_{timeframe}"
+                    raw_buffer = self.data_stream.ohlcv_buffer.get(tracker_key)
+                    
+                    if raw_buffer:
+                        import pandas as pd
+                        # list(raw_buffer) triggers a snapshot of the deque at this moment
+                        df = pd.DataFrame(list(raw_buffer), columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                        df.set_index('timestamp', inplace=True)
+                        await engine_instance.on_candle_closed(symbol, df)
                 
         is_futures = ctx.market.lower() == 'futures'
         self.data_stream.register_engine(engine_name, event_router, is_futures)

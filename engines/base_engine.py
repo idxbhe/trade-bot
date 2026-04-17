@@ -23,6 +23,10 @@ class BaseEngine(ABC):
     async def on_candle_closed(self, symbol: str, df: Any):
         """Called when a new candle closes."""
         pass
+    
+    async def on_price_update(self, symbol: str, price: float, stats: dict):
+        """Optional hook for lightweight ticker processing."""
+        pass
 
     async def shutdown(self):
         """Called when the Kernel stops."""
