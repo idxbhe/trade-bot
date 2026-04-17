@@ -267,10 +267,23 @@ class Kernel:
             base_price = best_bid if best_bid else price
             simulated_price = base_price * (1 - slippage_rate)
             
-        # 2. EQUITY LOGIC: Spot vs Futures
+        # 2. EQUITY & MARGIN LOGIC: Spot vs Futures
+        locked_margin = 0.0
         if ctx.market.lower() == 'futures':
-            # Futures: Margin is part of equity, we only track PnL on close
-            pass
+            # Futures Simulation: Calculate Required Margin
+            leverage = getattr(self.engines[engine_name], 'leverage', 1)
+            required_margin = (amount * simulated_price) / leverage
+            
+            # Validation: Insufficient Margin Check
+            available = self.state_manager.state[engine_name].get('available_balance', 0.0)
+            if available < required_margin:
+                self.report_status(engine_name, symbol, "ERROR", f"Insufficient Margin: Need ${required_margin:.2f}, Have ${available:.2f}")
+                logger.error(f"[{engine_name}] Order REJECTED. Insufficient Margin for {symbol} (Need: ${required_margin:.2f}, Avail: ${available:.2f})")
+                return False
+                
+            locked_margin = required_margin
+            # Deduct from available balance immediately
+            self.state_manager.state[engine_name]['available_balance'] -= locked_margin
         else:
             # Spot: Subtract full cost + entry fee from cash balance
             cost = simulated_price * amount
@@ -282,6 +295,7 @@ class Kernel:
             'amount': amount,
             'stop_loss': sl,
             'take_profit': tp,
+            'locked_margin': locked_margin,
             'max_pnl': 0.0,
             'min_pnl': 0.0
         }
@@ -425,6 +439,9 @@ class Kernel:
 
         if ctx.market.lower() == 'futures':
             # PnL di Futures sudah termasuk pengurangan semua fee
+            # PENTING: Kembalikan margin ke available_balance SEBELUM update equity agar rekonsiliasi tepat
+            locked = pos.get('locked_margin', 0.0)
+            self.state_manager.state[engine_name]['available_balance'] += locked
             self.state_manager.update_equity(engine_name, current_eq + pnl)
         else:
             # Spot: Revenue dikurangi biaya penutupan (biaya pembukaan sudah dipotong sebelumnya)

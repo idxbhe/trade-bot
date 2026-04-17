@@ -48,6 +48,7 @@ class StateManager:
         if engine_name not in self.state:
             self.state[engine_name] = {
                 'equity': initial_equity,
+                'available_balance': initial_equity,
                 'initial_equity': initial_equity,
                 'mode': mode,
                 'market': market,
@@ -127,6 +128,7 @@ class StateManager:
                         'stop_loss': r.stop_loss, 'take_profit': r.take_profit,
                         'sl_order_id': r.sl_order_id, 'tp_order_id': r.tp_order_id,
                         'closing_order_id': r.closing_order_id,
+                        'locked_margin': r.locked_margin,
                         'max_pnl': r.max_pnl, 'min_pnl': r.min_pnl
                     }
                 
@@ -209,8 +211,16 @@ class StateManager:
     def update_equity(self, engine_name: str, new_equity: float):
         if engine_name in self.state:
             self.state[engine_name]['equity'] = new_equity
+            self.reconcile_margin(engine_name)
             self._check_and_update_baselines(engine_name, new_equity)
             self.db_queue.put_nowait(('save_equity', engine_name, new_equity, self.state[engine_name]['baselines'].copy()))
+
+    def reconcile_margin(self, engine_name: str):
+        """Source of Truth reconciliation for simulated margin."""
+        if engine_name in self.state:
+            s = self.state[engine_name]
+            total_locked = sum(pos.get('locked_margin', 0.0) for pos in s['positions'].values())
+            s['available_balance'] = s['equity'] - total_locked
 
     def _check_and_update_baselines(self, engine_name: str, current_equity: float):
         baselines = self.state[engine_name]['baselines']
@@ -260,6 +270,7 @@ class StateManager:
             if 'closing_order_id' not in pos_data:
                 pos_data['closing_order_id'] = None
             self.state[engine_name]['positions'][symbol] = pos_data
+            self.reconcile_margin(engine_name)
             self.db_queue.put_nowait(('save_position', engine_name, symbol, pos_data, side))
 
     def add_pending_order(self, engine_name: str, order_id: str, order_data: dict):
@@ -273,6 +284,7 @@ class StateManager:
     def remove_position(self, engine_name: str, symbol: str):
         if engine_name in self.state and symbol in self.state[engine_name]['positions']:
             del self.state[engine_name]['positions'][symbol]
+            self.reconcile_margin(engine_name)
             self.db_queue.put_nowait(('remove_position', engine_name, symbol))
 
     def clear_engine_state(self, engine_name: str):
@@ -428,6 +440,7 @@ class StateManager:
         
         return {
             'equity': total_equity, 
+            'available_balance': s.get('available_balance', total_equity),
             'initial_equity': s['initial_equity'], 
             'total_pnl': total_pnl,
             'daily_pnl': total_equity - (b['daily'] or total_equity),
@@ -522,6 +535,7 @@ class StateManager:
                             rec.stop_loss = pos.get('stop_loss', 0.0); rec.take_profit = pos.get('take_profit', 0.0)
                             rec.sl_order_id = pos.get('sl_order_id'); rec.tp_order_id = pos.get('tp_order_id')
                             rec.closing_order_id = pos.get('closing_order_id')
+                            rec.locked_margin = pos.get('locked_margin', 0.0)
                             rec.max_pnl = pos.get('max_pnl', 0.0); rec.min_pnl = pos.get('min_pnl', 0.0)
                         else:
                             rec = ActivePosition(
@@ -529,7 +543,8 @@ class StateManager:
                                 amount=pos['amount'], entry_price=pos['entry_price'], 
                                 stop_loss=pos.get('stop_loss', 0.0), take_profit=pos.get('take_profit', 0.0),
                                 sl_order_id=pos.get('sl_order_id'), tp_order_id=pos.get('tp_order_id'),
-                                closing_order_id=pos.get('closing_order_id')
+                                closing_order_id=pos.get('closing_order_id'),
+                                locked_margin=pos.get('locked_margin', 0.0)
                             )
                             session.add(rec)
                         await session.commit()
