@@ -40,11 +40,11 @@ async def run_test_risk_and_execution():
     
     # 3. Test Order Execution (Mocking/Sandbox API expected to fail safely without valid keys)
     logger.info("\n[3] Testing Order Execution Engine (Dry Run):")
-    if is_safe:
+    if True:  # Changed from undefined is_safe
          logger.info("Circuit breaker is reset, attempting to format a mock order...")
          symbol = "BTC/USDT"
          # This will just print the intent and catch the CCXT exception since we use public/dummy keys
-         await order_manager.execute_limit_order(symbol, "buy", size, entry_price, post_only=True)
+         await order_manager.execute_limit_order("Test_Engine", symbol, "buy", size, entry_price, "spot", post_only=True)
     
     # Cleanup CCXT session
     from exchange.kucoin import kucoin_client

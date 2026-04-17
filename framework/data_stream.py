@@ -279,7 +279,11 @@ class DataStream:
                     
                     # 2. Update In-Memory Buffer (Event-based, Zero REST calls)
                     if tracker_key in self.ohlcv_buffer:
-                        self.ohlcv_buffer[tracker_key].append(closed_candle_raw)
+                        # Prevent duplicate timestamps from the warmup phase
+                        if len(self.ohlcv_buffer[tracker_key]) > 0 and self.ohlcv_buffer[tracker_key][-1][0] == closed_candle_raw[0]:
+                            self.ohlcv_buffer[tracker_key][-1] = closed_candle_raw
+                        else:
+                            self.ohlcv_buffer[tracker_key].append(closed_candle_raw)
                         
                         # 3. Synchronously push to all subscribed engines
                         for eng_name, subs in self.subscriptions.items():

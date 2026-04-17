@@ -408,7 +408,7 @@ class Kernel:
                 # 4. Eksekusi IOC Limit Order
                 # IOC = Immediate or Cancel (Eksekusi sebanyak yang ada di harga tersebut, batalkan sisanya)
                 order_res = await order_manager.execute_limit_order(
-                    symbol=symbol, side=ccxt_side, amount=chunk, price=price,
+                    engine_name=engine_name, symbol=symbol, side=ccxt_side, amount=chunk, price=price,
                     market=ctx.market, leverage=leverage, post_only=False, reduce_only=True
                 )
                 
@@ -436,7 +436,7 @@ class Kernel:
                 
                 logger.info(f"[{engine_name}] [SmartClose] Fallback: Placing final Limit order at ${final_price:,.2f}")
                 await order_manager.execute_limit_order(
-                    symbol=symbol, side=ccxt_side, amount=remaining, price=final_price,
+                    engine_name=engine_name, symbol=symbol, side=ccxt_side, amount=remaining, price=final_price,
                     market=ctx.market, leverage=leverage, post_only=False, reduce_only=True
                 )
             
@@ -533,7 +533,7 @@ class Kernel:
                             )
                     else:
                         order = await order_manager.execute_limit_order(
-                            symbol=symbol, side=ccxt_side, amount=pos['amount'], price=exit_price,
+                            engine_name=engine_name, symbol=symbol, side=ccxt_side, amount=pos['amount'], price=exit_price,
                             market=ctx.market, leverage=leverage, post_only=False, reduce_only=True
                         )
                     
