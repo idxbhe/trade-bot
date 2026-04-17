@@ -341,6 +341,100 @@ class Kernel:
             
         return success
 
+    async def _execute_smart_emergency_close(self, engine_name: str, symbol: str, ccxt_side: str, amount: float, leverage: int, max_retries: int = 15) -> Dict[str, Any]:
+        """
+        Executes a chunked, slippage-protected IOC Limit order sequence for emergency exits.
+        Replaces raw Market Orders to avoid liquidations and deep slippage.
+        """
+        remaining = amount
+        total_filled = 0.0
+        weighted_price_sum = 0.0
+        retries = 0
+        
+        ctx = self.contexts.get(engine_name)
+        if not ctx: return {}
+
+        chunk_size_pct = 0.20 # 20% dari total amount per iterasi
+        slippage_tolerance = 0.005 # 0.5% Chaser Price
+        
+        logger.info(f"[{engine_name}] [SmartClose] Initiating Smart Close for {symbol} ({amount:.4f} {ccxt_side.upper()})")
+        
+        try:
+            while remaining > 0 and retries < max_retries:
+                retries += 1
+                
+                # 1. Ambil harga pasar saat ini (Best Bid/Ask)
+                best_bid = self.data_stream.latest_bids.get(symbol)
+                best_ask = self.data_stream.latest_asks.get(symbol)
+                
+                if not best_bid or not best_ask:
+                    # Fallback ke Order Book jika data stream kosong
+                    ticker = await self.get_order_book(engine_name, symbol, limit=1)
+                    best_bid = ticker['bids'][0][0] if ticker.get('bids') and len(ticker['bids']) > 0 else None
+                    best_ask = ticker['asks'][0][0] if ticker.get('asks') and len(ticker['asks']) > 0 else None
+                
+                if not best_bid or not best_ask:
+                    logger.warning(f"[{engine_name}] [SmartClose] No orderbook data. Retrying iteration {retries}/{max_retries}...")
+                    await asyncio.sleep(1)
+                    continue
+
+                # 2. Kalkulasi Chaser Price agresif (Slippage Protected)
+                if ccxt_side == 'buy': # Menutup SHORT
+                    price = best_ask * (1 + slippage_tolerance)
+                else: # Menutup LONG
+                    price = best_bid * (1 - slippage_tolerance)
+
+                # 3. Kalkulasi Chunk (Pecah 20% agar tidak tembus orderbook dalam satu hit)
+                chunk = min(amount * chunk_size_pct, remaining)
+                
+                logger.debug(f"[{engine_name}] [SmartClose] Iteration {retries}: Chunk {chunk:.4f} @ ${price:,.2f} (IOC)")
+                
+                # 4. Eksekusi IOC Limit Order
+                # IOC = Immediate or Cancel (Eksekusi sebanyak yang ada di harga tersebut, batalkan sisanya)
+                order_res = await order_manager.execute_limit_order(
+                    symbol=symbol, side=ccxt_side, amount=chunk, price=price,
+                    market=ctx.market, leverage=leverage, post_only=False, reduce_only=True
+                )
+                
+                if order_res:
+                    # Ambil jumlah yang berhasil tereksekusi
+                    filled = float(order_res.get('filled', 0.0))
+                    avg_price = float(order_res.get('average', 0.0) or order_res.get('price', 0.0))
+                    
+                    if filled > 0:
+                        total_filled += filled
+                        weighted_price_sum += (avg_price * filled)
+                        remaining -= filled
+                        logger.info(f"[{engine_name}] [SmartClose] Filled {filled:.4f} @ ${avg_price:,.2f}. Remaining: {remaining:.4f}")
+                
+                # 5. Jeda antar chunk agar orderbook bisa menyerap kejutan
+                await asyncio.sleep(0.5)
+                
+            if remaining > 0:
+                logger.critical(f"[{engine_name}] [SmartClose] CRITICAL: FAILED to fully close {symbol} after {max_retries} attempts. {remaining:.4f} remains.")
+                
+                # FALLBACK: Gunakan Limit Order standar di harga Mark Price (melalui Best Bid/Ask akhir) tanpa IOC
+                # Ini upaya terakhir sebelum menyerah
+                ticker = await self.get_order_book(engine_name, symbol, limit=1)
+                final_price = ticker['bids'][0][0] if ccxt_side == 'sell' else ticker['asks'][0][0]
+                
+                logger.info(f"[{engine_name}] [SmartClose] Fallback: Placing final Limit order at ${final_price:,.2f}")
+                await order_manager.execute_limit_order(
+                    symbol=symbol, side=ccxt_side, amount=remaining, price=final_price,
+                    market=ctx.market, leverage=leverage, post_only=False, reduce_only=True
+                )
+            
+            return {
+                'id': 'SMART_CLOSE_AGGREGATED',
+                'filled': total_filled,
+                'average': (weighted_price_sum / total_filled) if total_filled > 0 else 0.0,
+                'status': 'closed' if remaining <= 0 else 'partial'
+            }
+
+        except Exception as e:
+            logger.error(f"[{engine_name}] [SmartClose] Exception: {e}")
+            return {'id': 'SMART_CLOSE_ERROR', 'filled': total_filled, 'average': 0.0, 'status': 'error'}
+
     async def close_position(self, engine_name: str, symbol: str, exit_price: float, reason: str) -> bool:
         ctx = self.contexts.get(engine_name)
         if not ctx: return False
@@ -354,15 +448,25 @@ class Kernel:
             ccxt_side = 'sell' if pos['side'] == 'LONG' else 'buy'
             leverage = getattr(self.engines[engine_name], 'leverage', 1)
             
-            # Emergency logic for Market Orders
+            # Emergency logic for Market Orders vs Smart Close
             emergency_reasons = ['STOP_LOSS', 'MANUAL_CLOSE', 'CIRCUIT_BREAKER', 'DYNAMIC_EXIT']
             
             if reason in emergency_reasons:
-                logger.warning(f"[{engine_name}] Emergency exit triggered for {symbol} (Reason: {reason}). Executing Market Order.")
-                order = await order_manager.execute_market_order(
-                    symbol=symbol, side=ccxt_side, amount=pos['amount'],
-                    market=ctx.market, leverage=leverage, reduce_only=True
-                )
+                if ctx.market.lower() == 'futures' and reason in ['STOP_LOSS', 'CIRCUIT_BREAKER']:
+                    # SMART EMERGENCY: Gunakan chunking IOC untuk Futures
+                    logger.warning(f"[{engine_name}] SMART Emergency exit triggered for {symbol} (Reason: {reason})")
+                    order = await self._execute_smart_emergency_close(
+                        engine_name, symbol, ccxt_side, pos['amount'], leverage
+                    )
+                    # WAP dari Smart Close digunakan sebagai harga exit aktual
+                    actual_exit_price = order.get('average')
+                else:
+                    # Standard Market Order untuk Spot atau penutupan Manual
+                    logger.warning(f"[{engine_name}] Emergency exit triggered for {symbol} (Reason: {reason}). Executing Market Order.")
+                    order = await order_manager.execute_market_order(
+                        symbol=symbol, side=ccxt_side, amount=pos['amount'],
+                        market=ctx.market, leverage=leverage, reduce_only=True
+                    )
             else:
                 # Standard exit: Limit Order but with post_only=False to ensure execution
                 order = await order_manager.execute_limit_order(
