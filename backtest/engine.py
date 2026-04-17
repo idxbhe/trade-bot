@@ -83,14 +83,30 @@ class BacktestEngine:
             # 2. Check existing positions for Stop Loss or Take Profit (Realism using High/Low)
             for pos in self.positions[:]: 
                 if pos['type'] == 'LONG':
-                    # Stop Loss: Check if Low touched or passed SL
-                    if row['low'] <= pos['stop_loss']:
-                        # Execute at exact stop loss price for realism
-                        self._close_position(pos, pos['stop_loss'], index, 'STOP_LOSS')
-                    # Take Profit: Check if High touched or passed Target
-                    elif 'target_exit' in pos and row['high'] >= pos['target_exit']:
-                        # Execute at exact target price
-                        self._close_position(pos, pos['target_exit'], index, 'TAKE_PROFIT')
+                    # Jika Open sudah di bawah SL, eksekusi di Open (Gap Down). Jika tidak, gunakan SL.
+                    actual_sl = min(pos['stop_loss'], row['open']) if row['low'] <= pos['stop_loss'] else None
+                    if actual_sl:
+                        self._close_position(pos, actual_sl, index, 'STOP_LOSS')
+                        continue
+                    
+                    # Jika Open sudah di atas TP, eksekusi di Open (Gap Up). Jika tidak, gunakan TP.
+                    actual_tp = max(pos['target_exit'], row['open']) if row['high'] >= pos['target_exit'] else None
+                    if actual_tp:
+                        self._close_position(pos, actual_tp, index, 'TAKE_PROFIT')
+                        continue
+
+                elif pos['type'] == 'SHORT':
+                    # Jika Open sudah di atas SL, eksekusi di Open (Gap Up). 
+                    actual_sl = max(pos['stop_loss'], row['open']) if row['high'] >= pos['stop_loss'] else None
+                    if actual_sl:
+                        self._close_position(pos, actual_sl, index, 'STOP_LOSS')
+                        continue
+                    
+                    # Jika Open sudah di bawah TP, eksekusi di Open (Gap Down).
+                    actual_tp = min(pos['target_exit'], row['open']) if row['low'] <= pos['target_exit'] else None
+                    if actual_tp:
+                        self._close_position(pos, actual_tp, index, 'TAKE_PROFIT')
+                        continue
             
             # 3. Generate Signal for NEXT candle
             # We feed data up to current index (current candle has just finished closing)
